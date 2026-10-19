@@ -1,6 +1,6 @@
 # ps5-linux
 
-**ps5-linux** leverages patched HV vulnerabilities to transform your **PS5 Phat and Slim** console running **3.00-7.61 firmwares** into a highly capable Linux PC, unlocking its full hardware potential for desktop use. Powered by 8 CPU cores (16 threads) at **3.5 GHz** and a GPU at **2.23 GHz**, it provides enough performance to run Steam games and various emulators with impressive fluidity.
+**ps5-linux** leverages patched HV vulnerabilities to transform your **PS5 Phat, Slim and Pro** console running **3.00-7.61 or 13.60 firmwares** into a highly capable Linux PC, unlocking its full hardware potential for desktop use. Powered by 8 CPU cores (16 threads) at **3.5 GHz** and a GPU at **2.23 GHz**, it provides enough performance to run Steam games and various emulators with impressive fluidity.
 
 Features:
 
@@ -33,13 +33,14 @@ detected automatically at runtime (no separate build).
 
 ## PS5 firmware
 
-*ps5-linux* is only supported on PS5 Phat and Slim on the following firmwares:
+*ps5-linux* is supported on PS5 Phat and Slim on the following firmwares, and on PS5 Phat, Slim and **Pro** on 13.60:
 
 - **3.00**, **3.10**, **3.20**, **3.21** without M.2 support
 - **4.00**, **4.02**, **4.03**, **4.50**, **4.51** with M.2 support
 - **5.00**, **5.02**, **5.10**, **5.50** with M.2 support
 - **6.00**, **6.02**, **6.50** with M.2 support
 - **7.00**, **7.01**, **7.20**, **7.40**, **7.60**, **7.61** with M.2 support
+- **13.60** with M.2 support — **PS5 Phat, Slim and Pro** (this fork)
 
 Support for 1.xx and 2.xx firmwares may be added in the future, but we will not prioritize this effort.
 
@@ -279,7 +280,7 @@ For any future ps5-linux updates, you can download the `.deb` or `.pkg.tar.zst` 
 ## FAQ
 
 - Q: Will higher >=8.00 firmwares be supported?
-  - A: No.
+  - A: **13.60** is supported (base and PS5 Pro) in this fork. 8.00-13.50 are not supported; if you are on 12.00-13.60 you can update to 13.60.
 - Q: Why can I not use M.2 on 3.xx?
   - A: Because the PS5 fails to boot with it attached.
 - Q: Can I dual-boot Linux and PS5 OS?

@@ -19,8 +19,6 @@ This fork adds **firmware 13.60** support, including the **PS5 Pro**, on top of 
 project. Linux boots to a desktop through the same rest-mode / S3-resume mechanism; PS5 Pro is
 detected automatically at runtime (no separate build).
 
-> **Known issue:** there is an I/O issue on 13.60 that is currently being worked on.
-
 > **Porting to other firmwares:** bringing this route to a new firmware **requires a UART/serial
 > cable** (3.3 V TTL on the Titania test pins, 230400 8N1) for debugging. The resume-time stages
 > emit their progress markers over serial, and a failed resume typically dies with no network and

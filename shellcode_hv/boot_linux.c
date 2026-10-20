@@ -101,12 +101,17 @@ static void e820_memory_setup(struct boot_params *bp) {
    * gap, then more RAM, then the REAL HV carveout at 0x8e0000000-0x8e2000000 (matches
    * derive_hv_base()'s live measurement this session, 0x8e0000000 size 0x2000000), then RAM
    * again. Cross-checked against github.com/ps5-linux/ps5-linux-loader PR #47, 2026-10-18. */
+  /* Retail PS5 Pro has 16 GB of DRAM. RAM ends at 0x47f300000 (~18 GB physical,
+   * ~16 GB usable); the HV carveout at 0x8e0000000 (38 GB) is a reserved high
+   * aperture, not DRAM. Do NOT expose 0x880000000-0x900000000 as RAM: 32 GB is
+   * devkit-only, and on a 16 GB retail Pro those windows are nonexistent.
+   * Marking them RAM lets Linux allocate pages/DMA there; the xHCI then DMAs
+   * into absent physical memory and hangs ("HC died"). */
   if (info.kit_type == KIT_RETAIL_PRO) {
     append_e820_table(bp, 0x470000000, 0x47f300000, E820_TYPE_RAM);
-    append_e820_table(bp, 0x47f300000, 0x880000000, E820_TYPE_RESERVED);
-    append_e820_table(bp, 0x880000000, 0x8e0000000, E820_TYPE_RAM);
+    append_e820_table(bp, 0x47f300000, 0x8e0000000, E820_TYPE_RESERVED);
     append_e820_table(bp, 0x8e0000000, 0x8e2000000, E820_TYPE_RESERVED); // HV
-    append_e820_table(bp, 0x8e2000000, 0x900000000, E820_TYPE_RAM);
+    append_e820_table(bp, 0x8e2000000, 0x900000000, E820_TYPE_RESERVED);
   }
   // DevKits have 32GB
   else if (info.kit_type != KIT_DEVKIT) {

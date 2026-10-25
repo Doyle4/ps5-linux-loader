@@ -1,6 +1,5 @@
 # ps5-linux
 
-> ⚠️ **13.60 support is EXPERIMENTAL — your mileage may vary.** It boots on base and PS5 Pro, but stability (USB, display, peripherals) is not guaranteed and is still being worked on. Use at your own risk.
 
 **ps5-linux** leverages patched HV vulnerabilities to transform your **PS5 Phat, Slim and Pro** console running **3.00-7.61 or 13.60 firmwares** into a highly capable Linux PC, unlocking its full hardware potential for desktop use. Powered by 8 CPU cores (16 threads) at **3.5 GHz** and a GPU at **2.23 GHz**, it provides enough performance to run Steam games and various emulators with impressive fluidity.
 

@@ -2,579 +2,2030 @@
 
 #define KERNEL_TEXT 0xFFFFFFFF80210000
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
- * FW 7.61, THE khook (13xx) ROUTE -- not the hv_defeat_0607 route off_0761 serves.
- *
- * WHY THIS EXISTS: 4.51 and 7.61 have only ever booted Linux via hv_defeat_0304/0506/0607.
- * The 13xx exploit has NEVER run on either, so "7.61 works" says nothing about it, and
- * firmware version was confounded with loader route in every comparison made so far
- * (CONTEXT: "CONFOUND: FIRMWARE VERSION AND LOADER ROUTE ARE NOT INDEPENDENT"). 7.61 has a
- * picture today via 0607, so running the khook route on the SAME firmware isolates the
- * route as the variable. off_0761 is left untouched so both can be built and compared.
- *
- * GAD_STORE_RCX_R8_RET IS DELIBERATELY ABSENT (zero). That is the signal kh_retargeted()
- * tests: 7.61 contains none of 13.60's mov [rcx],rax / [rcx],rdx / [rcx],r8 / [rdi+8],rcx /
- * pop r8 / mov dr7,rax / or [rcx],eax at a drop-in ret, and 13.60 contains neither of the
- * two gadgets below. The inventories are disjoint, so khook emits whichever it is given.
- *
- * Every value below was read out of 7.61's own .text and the bytes printed and checked;
- * the two KERNEL_SYM_* derivations were validated by reproducing off_1360's recorded
- * values on 13.60 first.
- */
-
-/*
- * FW 12.00.00 -- ported 2026-09-14.
- *
- * Provenance for every entry is recorded in findings/PORT-1200-COMPLETE.md.
- * Values were re-derived from k12.elf rather than extrapolated from 7.61.
- *
- * NOTE: this firmware does NOT use hv_defeat_0607. The MSR 0x1B (APIC_BASE)
- * intercept handler was removed between 11.00 and 12.00, so the wrmsr at the
- * heart of that technique is logged and discarded -- see
- * findings/BLOCKER-apic-base-patched-1200.md. The defeat for 12.00 is the
- * S3/AP root-0 route (findings/PORT-S3-AP-ROOT0-1200.md). The gadget and
- * kernel offsets below are still required by prepare_resume.c and gpu.c.
- */
-
-
-
-
-/*
- * FW 8.00 and 9.00 -- derived 2026-10-15 for the FIRMWARE WALK, hv_defeat_0607 route.
- *
- * This route needs only ACPIGBL_FACS, COMMON_TSS, FUN_MEMCPY, five pop gadgets, WRMSR, IDT
- * and KERNEL_CODE_CAVE, so the khook gadget shortfall on 8.00/9.00 is irrelevant here.
- *
- * NOT YET BOOTED. The open question the walk exists to answer is whether the APIC_BASE MSR
- * intercept hv_defeat_0607 exploits still exists at 8.00/9.00/10.00 -- it is gone by 12.00,
- * and 11.00 panicked when it tried, so somewhere in this range it dies.
- */
-
-/*
- * FW 9.00 -- derived 2026-10-15 by signature. NOT BOOTED. 36 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
-
-/*
- * FW 10.00 -- derived 2026-10-15 for the FIRMWARE WALK, via the hv_defeat_0607 route.
- *
- * Derivation methods, each validated by reproducing recorded values on existing tables
- * before being applied here:
- *   ACPIGBL_FACS      AcpiSetFirmwareWakingVector's opening `mov rax,[rip+FACS]` + the stock
- *                     ACPICA tail. Reproduces off_1200 and off_1360.
- *   COMMON_TSS        init_secondary's prologue then its SECOND lea (4c 8d 05 at +0x18).
- *                     Reproduces off_1200 and off_1360.
- *   IDT               COMMON_TSS - 0x2CE0. That delta holds on 7.61, 12.00, 13.00 AND 13.60 --
- *                     four independent confirmations, one of them upstream Reborn's own
- *                     13_00.h. Still an inference; suspect it first if 10.00 misbehaves.
- *   KERNEL_UART_OVERRIDE  get_override accessor, disambiguated by caller count == 3.
- *   G_VBIOS           the `41 54 53 50 ... lea rcx,[rip+G_VBIOS]` site. Reproduces off_0761,
- *                     off_1200 and off_1360.
- *   KERNEL_CODE_CAVE  longest NOP run + 1. Independently reproduced off_1200's 0xD40500.
- *   FUN_SMP_NO_RENDEVOUS_BARRIER  the e9-thunk to the 6-byte empty stub 0x240 below
- *                     FUN_SMP_RENDEZVOUS. Reproduces off_1200's 0x31DB30 and off_1360's
- *                     0x261E08.
- *   GAD_RET_TRAMP     POP_RAX+1. The sweep's first-match value (0x92) is header data and is
- *                     NOT used. Upstream Reborn annotates the same rule in 13_00.h.
- *
- * The khook fields are included too (10.00 has SET_DR7 and lacks only GAD_OR_RCX_EAX_RET,
- * which is emitted only when oneshot=0), so this table can also drive hv_defeat_13xx if the
- * walk ever wants that comparison on 10.00.
- */
-
-/*
- * FW 11.00 -- derived 2026-10-15 for the ROUTE A/B.
- *
- * WHY THIS FIRMWARE: it is the only one that runs BOTH hv routes unmodified.
- * hv_defeat_0607 needs the MSR 0x1B (APIC_BASE) intercept handler, which was removed
- * between 11.00 and 12.00, so 11.00 still has it. hv_defeat_13xx needs GAD_SET_DR7_RAX
- * (present here) and uses GAD_OR_RCX_EAX_RET ONLY in the oneshot=0 branch -- with
- * oneshot=1 it is never emitted, which is why that field being 0 below is fine.
- *
- * Every value was derived by a method that first reproduced the recorded value on at least
- * two tables we already trust. The three that A3 needed IDA for on 12.00 were found here by
- * their referencing code instead:
- *   ACPIGBL_FACS         AcpiSetFirmwareWakingVector opens `mov rax,[rip+FACS]` then the
- *                        stock ACPICA body -- one hit per kernel, reproduces off_1200 and
- *                        off_1360.
- *   COMMON_TSS           init_secondary's prologue, then its SECOND lea (4c 8d 05, +0x18).
- *   KERNEL_UART_OVERRIDE get_override is `push rbp; mov rbp,rsp; movzx eax,[rip+d];
- *                        pop rbp; ret`. That shape alone gives 28 candidates, so the
- *                        disambiguator is CALLER COUNT == 3, unique on both knowns.
- *   G_VBIOS              the `41 54 53 50 48 89 fb 48 85 ff 74 1c ; lea rcx,[rip+G_VBIOS]`
- *                        site -- reproduces off_0761, off_1200 AND off_1360.
- *
- * *** IDT IS INFERRED, NOT MEASURED. *** COMMON_TSS - IDT is 0x2CE0 on both 12.00 and
- * 13.60, so IDT is taken as COMMON_TSS - 0x2CE0. Corroboration: that address has exactly 2
- * rip-relative referencing sites, the same count as the known-good IDTs on both. Suspect
- * this first if an 11.00 build misbehaves.
- *
- * PS5_WIFI_FW_OFFSET/SIZE are left 0: firmware.c checks for 0 and returns -1 with a notify,
- * so WiFi simply does not load. It is not on the boot path.
- */
-
-
-/*
- * FW 13.00 -- assembled 2026-10-15.
- *
- * The khook half (KERNEL_SYM_*, IDT, COMMON_TSS and the gadget set) is taken VERBATIM from
- * upstream byepervisor_reborn include/offsets/13_00.h, so those values are upstream's own
- * and are proven on hardware there. The data-side fields were derived here with methods
- * each validated by reproducing the recorded values on off_1200 and off_1360 first.
- *
- * PURPOSE: 13.60 boots Linux on this route and shows NO PICTURE. Is that specific to 13.60
- * or true of every 13.x? One flash answers it, with the route held constant -- which is
- * exactly what the 11.00 A/B could not manage.
- */
-
-/* =====================================================================================
- * 13.60 -- the khook route (hv_defeat_13xx.c)
- *
- * Route: hook the kernel's OWN AP-start call (khv_startup_mp) with a DR0 execute
- * breakpoint, rewrite its RSI/RDX, and let the AP payload clear NESTED_CTRL.NP_ENABLE on
- * all 16 VMCBs. That sidesteps the DISABLE_STARTUP_MP ordering trap that blocked the
- * "issue HCALL 0x0f ourselves from the FACS #GP" design (RESOLVED-v7-startup-mp-window.md).
- *
- * Every value marked [V] is byte-verified against k1360_verify.i64 by
- * HVXring0/ida/verify_reborn_k1360.py -> SAFE TO SEND, and re-confirmed against
- * HVXring0/findings/LINUX-OFFSETS-13.60.md and PATCH-INVENTORY-13.60.md.
- *
- * All of these are now derived and verified. Two sources, both offline:
- *   findings/LINUX-OFFSETS-13.60-DERIVED.md  (kernel side, from k1360_verify.i64 / k761.i64)
- *   findings/HV-SIDE-13.60-DERIVED.md        (HV side + the e820 provenance)
- *
- * Standalone verifiers under HVXring0/ida/ end in SAFE TO SEND:
- *   verify_reborn_k1360.py, verify_cfi_cave1360.py, verify_smp1360.py, verify_bootoffs1360.py
- *
- * hv_defeat_13xx() still aborts if any field IT depends on is 0 -- a wrong offset in a ROP
- * chain is arbitrary code execution on a live kernel, so a loud refusal beats a plausible
- * guess. The fields deliberately left 0 (STOPPED_CPUS, FUN_STOP_CPUS, FUN_AS_LAPIC_EOI,
- * FUN_HV_UNMAP_PT_TMR, HOOK_ACPI_WAKEUP_MACHDEP) are the 0506-only ones, unused on this
- * route, and are not in that check.
- * ===================================================================================== */
-offset_list off_1360 = {
-    /* ---- loader plumbing ---- */
-    /* IOMMU_SOFTC confirmed by the resume path dereferencing it at +0x78/+0x80/+0x60b90,
-     * exactly iommu.h's IOMMU_SC_CB2_PTR / CB3_PTR / EB_PTR. */
-    .IOMMU_SOFTC        = 0x3543A70,
-    /* Same field value as 12.00; the gbase_suspend_game_vm shape (bound 16, 0x100 gvmspace
-     * stride) is unchanged. */
-    .VMSPACE_VM_VMID    = 0x1EC,
-    .VMSPACE_VM_PMAP    = 0x1D8,      /* used successfully by every payload */
-    /* Cross-validated: 12.00's and 13.60's gvmspace arrays are each reached by exactly 36
-     * rip-relative refs with identical deltas. */
-    .DATA_BASE_GVMSPACE = 0x3BAA570,
-
-    /* ---- guest prep ---- */
-    .ACPIGBL_FACS       = 0x39C9490,  /* [V] LINUX-OFFSETS-13.60.md ADDENDUM 2 */
-    .IDT                = 0x3BB4300,  /* [V] */
-    .COMMON_TSS         = 0x3BB6FE0,  /* [V] stride 0x68 */
-    .FUN_MEMCPY         = 0x2590B0,   /* [V] */
-
-    /* 0506-only fields; unused on 13.60 (no #IPI/#GP stop-cpus dance on this route) */
-    .STOPPED_CPUS       = 0,
-    .FUN_STOP_CPUS      = 0,
-    .FUN_AS_LAPIC_EOI   = 0,
-    .FUN_HV_UNMAP_PT_TMR = 0,
-    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3912CB,  /* [V] derived via "Warning: suspend tsc is wrong" string xref -> resume tail `xor edi,edi;xor esi,esi; call AcpiSetFirmwareWakingVector(0x6D37A0)`. Method reproduces 3.00=0x390E73 & 4.51=0x3A75E3 EXACTLY. (prior 0x66BBA2 was a shape-only lookalike, WRONG.) */
-
-    /* ---- shared gadgets ---- */
-    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E32B4,  /* [V] add rsp,0x28 ; pop rbp ; ret */
-    .GAD_IRETQ            = 0x257B3D,  /* [V] */
-    .GAD_POP_RAX_RET      = 0xB8CA6E,  /* [V] pop rax ; ret  (0xB8CA6D is pop r8) */
-    .GAD_POP_RDI_RET      = 0x28CE6D,  /* [V] */
-    .GAD_POP_RSI_RET      = 0x34CB91,  /* [V] */
-    .GAD_POP_RDX_RET      = 0x2A0F7B,  /* [V] */
-    .GAD_POP_RCX_RET      = 0x2918B2,  /* [V] */
-    .GAD_POP_RSP_RET      = 0xB8291B,  /* [V] */
-    .GAD_WRMSR_RET        = 0x255034,  /* [V] unique in the image */
-    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x3D3F2A,  /* [V] */
-
-    /* ---- khook scratch + the AP handoff ---- */
-    .KERNEL_SYM_HV_MP_STARTUP_CALL     = 0xC16EE0,   /* [V] the hook target */
-    .KERNEL_SYM_MP_STARTUP_INIT_VECTOR = 0x269FB8,   /* [V] where the AP returns to bringup */
-    .KERNEL_SYM_DATA_CAVE              = 0x2D39000,  /* [V] khook scratch + oracle */
-
-    /* ---- khook's own gadget set (semantics are load-bearing) ---- */
-    .GAD_PIVOT_ADD_RSP28_RET  = 0x25213E,  /* [V] 48 83 C4 28 F3 C3  add rsp,0x28 ; rep ret.
-                                            * The F3 is ignored for RET, so this IS the bare
-                                            * pivot khook assumes and the [ist+0] chain
-                                            * discipline holds. Do NOT swap in 0x9E32B4 --
-                                            * its extra pop rbp shifts the layout by 8. */
-    .GAD_POP_R8_RET           = 0xB8CA6D,  /* [V] 47 58 C3 (REX 0x47, not 0x41) */
-    .GAD_STORE_RCX_R8_RET     = 0x474389,  /* [V] 4C 89 01 C3  mov [rcx],r8 ; ret */
-    .GAD_STORE_RDI8_RCX_RET   = 0x32693F,  /* [V] 48 89 4F 08 C3  mov [rdi+8],rcx ; ret */
-    .GAD_OR_RCX_EAX_RET       = 0x321EA0,  /* [V] 09 01 C3  or [rcx],eax ; ret */
-    .GAD_SET_DR7_RAX          = 0xA07BA6,  /* [V] 0F 23 F8 44 89 C0 C3 */
-    .GAD_ST_RCX_RDX_RET       = 0x82B915,  /* [V] 48 89 11 C3 -- our earlier scan wrongly
-                                            * reported NO such gadget; it exists. */
-    .GAD_ST_RCX_RAX_RET       = 0x2BB28F,  /* [V] 48 89 01 31 C0 C3 */
-    .GAD_MOV_RAX_RSI_RET      = 0x8E3A44,  /* [V] 48 89 F0 C3 */
-    .GAD_MOV_RAX_RDI_RET      = 0xBECDEA,  /* [V] 48 89 F8 C3 */
-    .GAD_REP_MOVSB            = 0x25D027,  /* [V] F3 A4 66 90 F3 C3 */
-    .GAD_CLD_RET              = 0x30644F,  /* [V] FC C3 */
-    .GAD_RET_TRAMP            = 0x2912A2,  /* [V] C3 */
-    .GAD_DBREG_RESUME         = 0x2529D8,  /* [V] resumectx tail. Unnamed raw offset: it
-                                            * bakes in rbp 0x20 / rsp 0x28 / rip 0x38 /
-                                            * dr7 0xa0 and loads DR0 from RAX. Verified
-                                            * against the disassembly in
-                                            * VERIFY-reborn-offsets-13.60.md. */
-
-    /* ---- shellcode_kernel / shellcode_hv plumbing ---- */
-    /* 0x6D40 bytes of 0x90 at the tail of the R-X segment, zero xrefs, no function overlap.
-     * Upstream's 0x500 is 0xCC blanked code on this firmware, exactly as it was on 12.00. */
-    .KERNEL_CODE_CAVE          = 0xCB92C0,
-    /* The THUNK, not the printf body -- CFI admits only thunks. 16873 xrefs; the body it
-     * jumps to is 0x4ADD60, which the third-party Reborn table calls "printf". They are NOT
-     * different functions: 0x25D410 is `jmp <body>`. Same pattern as off_1200. */
-    .FUN_PRINTF                = 0x25D410,
-    .FUN_HV_IOMMU_SET_BUFFERS  = 0xC16B00,  /* VMMCALL wrapper, mov eax,6 */
-    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC16A40,/* VMMCALL wrapper, mov eax,0Ah */
-    /* CORRECTED: the earlier recorded candidate 0xC9FA20 is a lock wrapper
-     * (`mov rdi,[rdi+8] ; add rdi,0x148 ; call mtx_lock`), not rendezvous. The real one is
-     * the unique 0x1D-byte arg-shuffle leaf. */
-    .FUN_SMP_RENDEZVOUS        = 0xB03BA0,
-    /* The CFI THUNK 0x261E08, not the real function 0xB03960. smp_rendezvous_action compares
-     * the setup/teardown pointers against this address literally and the CFI range check
-     * admits only thunks -- same reasoning as off_1200. */
-    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x261E08,
-
-    /* CONFIRMED. Both are H-relative; H = 0x62800000 on this console, so the absolute
-     * physicals below hold for it. If H is ever different, these must be recomputed as
-     * H + 0x6F00 and H + 0x47375 respectively -- the loader's shellcode_kernel consumes
-     * them as raw physicals in patch_hv().
-     *   HV_CODE_CAVE_PA     = H + 0x6F00  , inner-container VA 0x6F00 (NOT in the hypercore).
-     *                         2990 file-backed 0xCC bytes from 0x6452, 0x100 free from
-     *                         0x6F00, inside the loader's identity map [0x62804000,0x62807000)
-     *                         whose NX bit is clear (attr 0x280; (attr>>8)<<63 overflows to 0).
-     *   HV_HANDLE_VMEXIT_PA = H + 0x47375 , inner-hypercore VA 0x14375. Found by the CPL gate
-     *                         `cmp byte [VMCB+4CBh],0` (unique at 0x14379) plus the single
-     *                         EXITCODE switch (table 0x181FC, lowcase 0x14, cmp rcx,7Ah) --
-     *                         exactly one case targets it, and IDA calls it
-     *                         "jumptable 0x13D00 case 129". It is a mid-function block head,
-     *                         not a round ...800, same as 12.00. 13.60 is +0x200 above
-     *                         12.00's 0x62847175. */
-    .HV_CODE_CAVE_PA           = 0x62806F00,   /* H + 0x6F00 */
-    .HV_HANDLE_VMEXIT_PA       = 0x62847375,   /* H + 0x47375 */
-
-    /* ---- guest patches ---- */
-    .KERNEL_UART_OVERRIDE      = 0x21F9598,
-    /* cfi_check_fail -- string xref at 0xFFFFFFFF81521BFC -> 0x8065F925. Byte-for-byte the
-     * same 0x83-byte function 7.61 patches at 0x4757B0, only the prologue reordered; 7315
-     * xrefs (7.61: 7093, 12.00: 7351). 0xC3 over byte 0 is right because the ordinary path
-     * here is a hard fail. */
-    .KERNEL_CFI_CHECK          = 0x44F8C0,
-
-    /* ---- boot plumbing ---- */
-    .G_VBIOS                   = 0x3DDB9F0,
-    /* Real function, not the thunk. The thunk 0x39B3B0 (push rbp; mov rbp,rsp; pop rbp;
-     * jmp 0xC0EAA0) was tried and is BEHAVIOURALLY NEUTRAL -- it forwards rdi/rsi untouched, and
-     * "a plain thunk and its target are the same function" (the verifier says so for printf).
-     * The mp3 wrappers are NOT counter-examples: 0x818960 (cmd 21) and 0x818980 (cmd 22) are
-     * ordinary command functions that SET an argument (mov edi,cmd), whereas a CFI thunk is a bare
-     * jmp with no arg setup. Thunks are only load-bearing when an address is compared LITERALLY,
-     * which is FUN_SMP_NO_RENDEVOUS_BARRIER's case, not this one. Reverted so this run's signal is
-     * unambiguous: the content is the returned rc values, the link delay, and the cmdline. */
-    .FUN_TRANSMITTER_CONTROL   = 0xC0EAA0,
-    /* ***** CONFIRMED ON HARDWARE 2026-10-15: THIS IS THE 13.60 NO-VIDEO BUG *****
-     * Was 0xB1B020, the BIG function that references the string "HDCP mp3 lock". That is
-     * NOT mp3_initialize -- it is a different function that merely mentions mp3, and every
-     * table from 10.00 up had been pointing at it, while 4.51 and 7.61 (the only firmwares
-     * that ever produced a picture) pointed at the small wrapper.
-     *
-     * 0xA14130 is 13.60's unique small wrapper:
-     *     55 48 89 e5 53 50 89 fe bf <imm32> e8 ...
-     *     push rbp/rbx ; mov esi,edi ; mov edi,<id> ; call
-     * matching the loader's `int mp3_initialize(int vmid)`. It passes the SAME two ids
-     * 0x5210550 / 0x5210544 on all nine versions 4.51..13.60, sits ~0x1200-0x1400 after
-     * FUN_MP3_INVOKE on every one of them, and is a UNIQUE shape per kernel.
-     *
-     * MEASURED with this value on 13.60: 60f9=1b, 6070=98086504, link 4x0x1e -- the exact
-     * signature of video-working 7.61. Before it: 60f9=0b, bit 4 never set. */
-    .FUN_MP3_INITIALIZE        = 0xA14130,
-    .FUN_MP3_INVOKE            = 0xA12D30,
-    /* Confirmed by two independent methods: the getter constant, and the FW_HAS_LAST_BLOCK
-     * terminator at +0x7A238 (+16 = 0x7A248). */
-    .PS5_WIFI_FW_OFFSET        = 0x1518160,
-    .PS5_WIFI_FW_SIZE          = 500296,   /* 0x7A248 */
-
-    /* the two former hardcodes in hv_defeat_13xx.c, now table-driven */
-    .NVS_SIZETAB      = 0x1A1A030,
-    .PRELOAD_METADATA = 0x3DF1070,
+offset_list off_0300 = {
+    .IOMMU_SOFTC = 0x33175E0,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x06423F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x0390E73,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x048B9A0,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0x0B33E20,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0x0B33D50,
+    .FUN_SMP_RENDEZVOUS = 0x0A3E850,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x0287E50,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282CBCB,
+    .KERNEL_UART_OVERRIDE = 0x1EB0258,
+    .KERNEL_CFI_CHECK = 0x0441DD0,
+    .G_VBIOS = 0x0734B5D0,
+    .FUN_TRANSMITTER_CONTROL = 0x0B2A560,
+    .FUN_MP3_INITIALIZE = 0x0953890,
+    .FUN_MP3_INVOKE = 0x0952670,
+    .PS5_WIFI_FW_OFFSET = 0x1274460,
+    .PS5_WIFI_FW_SIZE = 492304,
 };
 
-/* ======================================================================
- * TABLES DERIVED 2026-10-15 BY SIGNATURE. NOT BOOTED.
- *
- * Every field comes from a method that reproduces the recorded value on EVERY firmware
- * that already records it: ACPIGBL_FACS 10/10, COMMON_TSS 10/10, FUN_MEMCPY 8/8 (>=7.00),
- * G_VBIOS 12/12, the three video functions 12/12 each, IDT 7/7 (>=7.20),
- * KERNEL_SYM_HV_MP_STARTUP_CALL 5/5, and all 25 gadgets 145/145.
- * Each emitted table was then re-verified independently: every gadget was disassembled at
- * its emitted offset and required to decode to the learned instruction sequence, and every
- * signature field was re-derived. 22/22 tables passed with zero disagreements.
- *
- * GADGETS ARE NOT LINEAR-SWEEP ALIGNED, and that is correct: `pop rax ; ret` is normally a
- * MISALIGNED reinterpretation of the middle of another instruction, which is exactly what
- * makes it a gadget. An earlier version of the finder required boundary alignment and
- * silently dropped every pop-style gadget.
- *
- * DELIBERATELY ABSENT from all of these: HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA,
- * KERNEL_SYM_DATA_CAVE, KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * The HV_* pair lives in the HYPERVISOR image, not x86_kernel.elf. The rest had methods
- * tried that did not reach 100% on the knowns, so they are omitted rather than guessed.
- * offsets_present() / hv_defeat_0607 will REFUSE a table that is missing what they need,
- * which is the correct outcome: fail loudly instead of arming a wrong address.
- * ====================================================================== */
+offset_list off_0310 = {
+    .IOMMU_SOFTC = 0x33175E0,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x06423F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x0390EB3,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x048B9E0,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0x0B33E60,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0x0B33D90,
+    .FUN_SMP_RENDEZVOUS = 0x0A3E890,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x0287EA8,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282CBCB,
+    .KERNEL_UART_OVERRIDE = 0x1EB0258,
+    .KERNEL_CFI_CHECK = 0x0441E10,
+    .G_VBIOS = 0x0734B5D0,
+    .FUN_TRANSMITTER_CONTROL = 0x0B2A5A0,
+    .FUN_MP3_INITIALIZE = 0x09538D0,
+    .FUN_MP3_INVOKE = 0x09526B0,
+    .PS5_WIFI_FW_OFFSET = 0x1274490,
+    .PS5_WIFI_FW_SIZE = 492304,
+};
 
-/*
- * FW 13.20 (devkit) -- fully derived 2026-10-15. NOT BOOTED.
- * Every method below reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_tables.py for the per-method scores.
- * IDT is COMMON_TSS - 0x2CE0, which holds for every known >= 7.20 (the delta is
- * 0x2BB0 at 5.00, 0x2C20 at 6.00 and 0x2CC0 at 7.00 -- do not use it below 7.20).
- * HV_CODE_CAVE_PA / HV_HANDLE_VMEXIT_PA are NOT derived here: they come from the
- * hypervisor image, not the kernel, so they are deliberately left out rather than
- * guessed, and hv_defeat_0607 will refuse this table until they are filled in.
- */
+offset_list off_0320 = {
+    .IOMMU_SOFTC = 0x33175E0,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x06423F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x391203,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x48BD30,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB34320,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB34250,
+    .FUN_SMP_RENDEZVOUS = 0xA3ED50,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x288230,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282CBCB,
+    .KERNEL_UART_OVERRIDE = 0x1EB0258,
+    .KERNEL_CFI_CHECK = 0x442160,
+    .G_VBIOS = 0x734B5D0,
+    .FUN_TRANSMITTER_CONTROL = 0xB2AA60,
+    .FUN_MP3_INITIALIZE = 0x953D30,
+    .FUN_MP3_INVOKE = 0x952B10,
+    .PS5_WIFI_FW_OFFSET = 0x1274550,
+    .PS5_WIFI_FW_SIZE = 492304,
+};
 
-/*
- * FW 13.40 (devkit) -- fully derived 2026-10-15. NOT BOOTED.
- * Every method below reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_tables.py for the per-method scores.
- * IDT is COMMON_TSS - 0x2CE0, which holds for every known >= 7.20 (the delta is
- * 0x2BB0 at 5.00, 0x2C20 at 6.00 and 0x2CC0 at 7.00 -- do not use it below 7.20).
- * HV_CODE_CAVE_PA / HV_HANDLE_VMEXIT_PA are NOT derived here: they come from the
- * hypervisor image, not the kernel, so they are deliberately left out rather than
- * guessed, and hv_defeat_0607 will refuse this table until they are filled in.
- */
+offset_list off_0321 = {
+    .IOMMU_SOFTC = 0x33175E0,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x06423F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x391203,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x48BD30,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB34320,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB34250,
+    .FUN_SMP_RENDEZVOUS = 0xA3ED50,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x288250,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282CBCB,
+    .KERNEL_UART_OVERRIDE = 0x1EB0258,
+    .KERNEL_CFI_CHECK = 0x442160,
+    .G_VBIOS = 0x734B5D0,
+    .FUN_TRANSMITTER_CONTROL = 0xB2AA60,
+    .FUN_MP3_INITIALIZE = 0x953D30,
+    .FUN_MP3_INVOKE = 0x952B10,
+    .PS5_WIFI_FW_OFFSET = 0x1274550,
+    .PS5_WIFI_FW_SIZE = 492304,
+};
 
-/*
- * FW 13.42 (devkit) -- fully derived 2026-10-15. NOT BOOTED.
- * Every method below reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_tables.py for the per-method scores.
- * IDT is COMMON_TSS - 0x2CE0, which holds for every known >= 7.20 (the delta is
- * 0x2BB0 at 5.00, 0x2C20 at 6.00 and 0x2CC0 at 7.00 -- do not use it below 7.20).
- * HV_CODE_CAVE_PA / HV_HANDLE_VMEXIT_PA are NOT derived here: they come from the
- * hypervisor image, not the kernel, so they are deliberately left out rather than
- * guessed, and hv_defeat_0607 will refuse this table until they are filled in.
- */
+offset_list off_0400 = {
+    .IOMMU_SOFTC = 0x33C7680,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x064C3F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3A7613,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x4A3240,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB638F0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB63830,
+    .FUN_SMP_RENDEZVOUS = 0xA6C920,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x295488,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282B45D,
+    .KERNEL_UART_OVERRIDE = 0x1F522A8,
+    .KERNEL_CFI_CHECK = 0x45A170,
+    .G_VBIOS = 0x72B7630,
+    .FUN_TRANSMITTER_CONTROL = 0xB5AD50,
+    .FUN_MP3_INITIALIZE = 0x9805C0,
+    .FUN_MP3_INVOKE = 0x97F3E0,
+    .PS5_WIFI_FW_OFFSET = 0x1392FB0,
+    .PS5_WIFI_FW_SIZE = 493000,
+};
 
-/*
- * FW 14.00 (devkit) -- fully derived 2026-10-15. NOT BOOTED.
- * Every method below reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_tables.py for the per-method scores.
- * IDT is COMMON_TSS - 0x2CE0, which holds for every known >= 7.20 (the delta is
- * 0x2BB0 at 5.00, 0x2C20 at 6.00 and 0x2CC0 at 7.00 -- do not use it below 7.20).
- * HV_CODE_CAVE_PA / HV_HANDLE_VMEXIT_PA are NOT derived here: they come from the
- * hypervisor image, not the kernel, so they are deliberately left out rather than
- * guessed, and hv_defeat_0607 will refuse this table until they are filled in.
- */
+offset_list off_0402 = {
+    .IOMMU_SOFTC = 0x33C7680,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x064C3F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3A7613,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x4A3240,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB63950,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB63890,
+    .FUN_SMP_RENDEZVOUS = 0xA6C970,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x29A018,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282B45D,
+    .KERNEL_UART_OVERRIDE = 0x1F522A8,
+    .KERNEL_CFI_CHECK = 0x45A170,
+    .G_VBIOS = 0x72B7630,
+    .FUN_TRANSMITTER_CONTROL = 0xB5ADA0,
+    .FUN_MP3_INITIALIZE = 0x980610,
+    .FUN_MP3_INVOKE = 0x97F430,
+    .PS5_WIFI_FW_OFFSET = 0x1392FB0,
+    .PS5_WIFI_FW_SIZE = 493000,
+};
 
-/*
- * FW 8.20 -- derived 2026-10-15 by signature. NOT BOOTED. 34 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0403 = {
+    .IOMMU_SOFTC = 0x33C7680,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x064C3F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3A7613,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x4A3240,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB639F0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB63930,
+    .FUN_SMP_RENDEZVOUS = 0xA6CA00,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x299F20,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282B45D,
+    .KERNEL_UART_OVERRIDE = 0x1F522A8,
+    .KERNEL_CFI_CHECK = 0x45A170,
+    .G_VBIOS = 0x72B7630,
+    .FUN_TRANSMITTER_CONTROL = 0xB5AE30,
+    .FUN_MP3_INITIALIZE = 0x9806A0,
+    .FUN_MP3_INVOKE = 0x97F4C0,
+    .PS5_WIFI_FW_OFFSET = 0x1392FB0,
+    .PS5_WIFI_FW_SIZE = 493000,
+};
 
-/*
- * FW 8.40 -- derived 2026-10-15 by signature. NOT BOOTED. 33 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0450 = {
+    .IOMMU_SOFTC = 0x33C7680,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x064C3F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x03A75E3,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x04A3270,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB63BB0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB63AF0,
+    .FUN_SMP_RENDEZVOUS = 0xA6CBB0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x299FC0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282B45D,
+    .KERNEL_UART_OVERRIDE = 0x1F522A8,
+    .KERNEL_CFI_CHECK = 0x45A1A0,
+    .G_VBIOS = 0x72B7630,
+    .FUN_TRANSMITTER_CONTROL = 0xB5AFF0,
+    .FUN_MP3_INITIALIZE = 0x980850,
+    .FUN_MP3_INVOKE = 0x97F670,
+    .PS5_WIFI_FW_OFFSET = 0x1392FC0,
+    .PS5_WIFI_FW_SIZE = 493000,
+};
 
-/*
- * FW 8.60 -- derived 2026-10-15 by signature. NOT BOOTED. 33 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0451 = {
+    .IOMMU_SOFTC = 0x33C7680,
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D0,
+    .DATA_BASE_GVMSPACE = 0x64C3F80,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3A75E3,
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = 0x4A3270,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xB63FE0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xB63F20,
+    .FUN_SMP_RENDEZVOUS = 0xA6CFE0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x299FA8,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282B45D,
+    .KERNEL_UART_OVERRIDE = 0x1F522A8,
+    .KERNEL_CFI_CHECK = 0x45A1A0,
+    .G_VBIOS = 0x72B7630,
+    .FUN_TRANSMITTER_CONTROL = 0xB5B420,
+    .FUN_MP3_INITIALIZE = 0x980BF0,
+    .FUN_MP3_INVOKE = 0x97FA10,
+    .PS5_WIFI_FW_OFFSET = 0x1393000,
+    .PS5_WIFI_FW_SIZE = 493000,
+};
 
-/*
- * FW 9.20 -- derived 2026-10-15 by signature. NOT BOOTED. 36 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0500 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D0,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C982A0 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF8745DCA0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF87460850 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CAB210 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF804486E0 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DA9060 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF80489E30 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b93d94 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff8044b06d - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803e8778 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803a92b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff8040dafc - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+	.GAD_POP_RSP_RET = (0xffffffff804510b0 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff80603c0a - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804A74B0 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CAB7F0 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804B3788 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282EBD0,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF82291378 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF80677FB0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF87673A50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DA0AB0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BC0440 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BBF160 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF8163E2B0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 493532,
+};
 
-/*
- * FW 9.40 -- derived 2026-10-15 by signature. NOT BOOTED. 36 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0502 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D0,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C982A0 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF8745DCA0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF87460850 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CAB210 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF804486E0 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DA9060 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF80489E30 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b93d94 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff8044b06d - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803e8778 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803a92b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff8054d532 - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+	.GAD_POP_RSP_RET = (0xffffffff804510b0 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff80603c0a - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804AA140 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CAB7F0 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804B3770 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282EBD0,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF82291378 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF80677FB0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF87673A50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DA0AB0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BC0440 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BBF160 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF8163E2B0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 493532,
+};
 
-/*
- * FW 9.60 -- derived 2026-10-15 by signature. NOT BOOTED. 36 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0510 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D0,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C982A0 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF8745DCA0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF87460850 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CAB460 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF804486E0 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DA9390 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF80489E30 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b93fe4 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff8044b06d - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803e8778 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803a92b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff8054d532 - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+	.GAD_POP_RSP_RET = (0xffffffff804510b0 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff80603c0a - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804A6C78 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CABA40 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804B3760 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282EBD0,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF82291378 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF80677FB0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF87673A50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DA0DE0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BC0690 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BBF3B0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF8163E670 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 493532,
+};
 
-/*
- * FW 10.01 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0550 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D0,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C942A0 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF8745DCA0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF87460850 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CAC250 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF804486A0 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DAA180 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF80489DF0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b94dd4 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xFFFFFFFF8044B02D - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803e8738 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803a9270 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff8054d4f2 - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+	.GAD_POP_RSP_RET = (0xffffffff80451070 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff80603cba - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804A7BD8 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CAC830 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804B3408 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6282DFEB,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF82291488 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF80678060 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF87673A50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DA1BD0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BC1480 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BC01A0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF8163EB30 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 493532,
+};
 
-/*
- * FW 10.20 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0600 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C04540 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF873CDDE0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF873D0A00 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CD13B0 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF80451E60 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DD36B0 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF804935B0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80bb6ad4 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xFFFFFFFF804547ED - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803f1ef8 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b2a30 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff803f321e - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+    .GAD_POP_RSP_RET = (0xffffffff8045a830 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff806141fa - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804B1460 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CD1990 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804BD118 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62841CE0,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822D25C8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806899B0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF875DFA50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DCB210 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BE3A40 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BE27C0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81665C00 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 494536,
+};
 
-/*
- * FW 10.40 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0602 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83C04540 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF873CDDE0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF873D0A00 - KERNEL_TEXT),
+    .STOPPED_CPUS = (0xFFFFFFFF87520DE0 - KERNEL_TEXT),
+    .FUN_STOP_CPUS = (0xFFFFFFFF80CD1390 - KERNEL_TEXT),
+    .FUN_AS_LAPIC_EOI = (0xFFFFFFFF80451E60 - KERNEL_TEXT),
+    .FUN_HV_UNMAP_PT_TMR = (0xFFFFFFFF80DD3690 - KERNEL_TEXT),
+    .FUN_MEMCPY = (0xFFFFFFFF804935B0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80bb6ab4 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xFFFFFFFF804547ED - KERNEL_TEXT),
+    // .GAD_POP_RAX_RET not needed
+    .GAD_POP_RDI_RET = (0xffffffff803f1ef8 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b2a30 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff804c48da - KERNEL_TEXT),
+    // .GAD_POP_RCX_RET not needed
+    .GAD_POP_RSP_RET = (0xffffffff8045a830 - KERNEL_TEXT),
+    // .GAD_WRMSR_RET not needed
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff806141fa - KERNEL_TEXT),
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804B0C38 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CD1970 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804C05A8 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62841CE0,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822D25C8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806899B0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF875DFA50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DCB1F0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BE3A20 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BE27A0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81665CC0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 494536,
+};
 
-/*
- * FW 10.60 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0650 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xffffffff83c04540 - KERNEL_TEXT),
+    .IDT = (0xffffffff873cdde0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xffffffff873d0a00 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xffffffff804935b0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80bb7224 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff804547ed - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040eb50 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff803f1ef8 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b2a30 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff80536a32 - KERNEL_TEXT),
+    //.GAD_POP_RCX_RET = (0xffffffff8033ba53 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff804e68b8 - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a830 - KERNEL_TEXT),
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = (0xffffffff8061421a - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451e84 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xffffffff806d2610 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xffffffff80cd20e0 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xffffffff804bc370 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62841D50,
+    .KERNEL_UART_OVERRIDE = (0xffffffff822d25c8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xffffffff80689a20 - KERNEL_TEXT),
+    .G_VBIOS = (0xffffffff875dfa50 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xffffffff80dcb990 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xffffffff80be4190 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xffffffff80be2f10 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xffffffff81665b90 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 494536,
+};
 
-/*
- * FW 11.20 (devkit) -- fully derived 2026-10-15. NOT BOOTED.
- * Every method below reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_tables.py for the per-method scores.
- * IDT is COMMON_TSS - 0x2CE0, which holds for every known >= 7.20 (the delta is
- * 0x2BB0 at 5.00, 0x2C20 at 6.00 and 0x2CC0 at 7.00 -- do not use it below 7.20).
- * HV_CODE_CAVE_PA / HV_HANDLE_VMEXIT_PA are NOT derived here: they come from the
- * hypervisor image, not the kernel, so they are deliberately left out rather than
- * guessed, and hv_defeat_0607 will refuse this table until they are filled in.
- */
+offset_list off_0700 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83AC9C50 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF83CDFDF0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF83CE2AB0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xFFFFFFFF804933C0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xFFFFFFFF80C431AF - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff804545cd - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040e790 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff803f1b38 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b2670 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff804da676 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff804e1fc1 - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a610 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451ac4 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF806CC530 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CB5CB0 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804BB4C8 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822C3338 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806854A0 - KERNEL_TEXT),
+    .G_VBIOS = (0xffffffff83ef7a40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DAECC0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BCB5C0 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BCA380 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81655400 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 11.40 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0701 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83AC9C50 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF83CDFDF0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF83CE2AB0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xFFFFFFFF804933C0 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xFFFFFFFF80C431AF - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff804545cd - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040e790 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff803f1b38 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b2670 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff805451e2 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff804e1fc1 - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a610 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451ac4 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF806CC530 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CB5CB0 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804BA8F8 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822C3338 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806854A0 - KERNEL_TEXT),
+    .G_VBIOS = (0xffffffff83ef7a40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DAECC0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BCB5C0 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BCA380 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81655400 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 11.60 -- derived 2026-10-15 by signature. NOT BOOTED. 40 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0720 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xffffffff83ac9c50 - KERNEL_TEXT),
+    .IDT = (0xffffffff83cdfdf0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xffffffff83ce2ad0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xffffffff80493600 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80c435ff - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff809c52e8 - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff80e4c2d5 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff80dfe38b - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff80dfdd9e - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff80a4fd38 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff80e24def - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff80e2b4c0 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451d04 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xffffffff806cc830 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xffffffff80cb6100 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xffffffff804c0820 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xffffffff822c33f8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xffffffff806857a0 - KERNEL_TEXT),
+    .G_VBIOS = (0xffffffff83ef7a40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xffffffff80dafcc0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xffffffff80bcba10 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xffffffff80bca7d0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xffffffff81655700 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 12.02 -- derived 2026-10-15 by signature. NOT BOOTED. 41 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0740 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83AC9C50 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF83CDFDF0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF83CE2AD0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xFFFFFFFF80493600 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80c435ff - KERNEL_TEXT),
+    .GAD_IRETQ = (0xffffffff8045480d - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040e9d0 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff803f1d78 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b28b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff805cd53c - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff80e24def - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a850 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451d04 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xffffffff804b19f0 - KERNEL_TEXT),//0xffffffff806cc830
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xffffffff80cb6100  - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xffffffff804badf0 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822C33F8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xffffffff806857a0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF83EF7A40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xffffffff80dafcc0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xffffffff80bcba10 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xffffffff80bca7d0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xffffffff81655700 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 12.20 -- derived 2026-10-15 by signature. NOT BOOTED. 41 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0760 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83AC9C50 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF83CDFDF0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF83CE2AD0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xFFFFFFFF80493600 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b9da44 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xFFFFFFFF8045480D - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040e9d0 - KERNEL_TEXT), 
+    .GAD_POP_RDI_RET = (0xffffffff803f1d78 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b28b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff8078d502 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff804e2231 - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a850 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451d04 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804B1DB8 - KERNEL_TEXT), 
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CB6710  - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804BD280 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00, 
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822C33F8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806857B0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF83EF7A40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DB02D0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BCC020 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BCADE0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81655800 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 12.40 -- derived 2026-10-15 by signature. NOT BOOTED. 41 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_0761 = {
+    // .IOMMU_SOFTC not needed
+    // .VMSPACE_VM_VMID not needed
+    .VMSPACE_VM_PMAP = 0x1D8,
+    // .DATA_BASE_GVMSPACE not needed
+    .ACPIGBL_FACS = (0xFFFFFFFF83AC9C50 - KERNEL_TEXT),
+    .IDT = (0xFFFFFFFF83CDFDF0 - KERNEL_TEXT),
+    .COMMON_TSS = (0xFFFFFFFF83CE2AD0 - KERNEL_TEXT),
+    // .STOPPED_CPUS not needed
+    // .FUN_STOP_CPUS not needed
+    // .FUN_AS_LAPIC_EOI not needed
+    // .FUN_HV_UNMAP_PT_TMR not needed
+    .FUN_MEMCPY = (0xFFFFFFFF80493600 - KERNEL_TEXT),
+    .GAD_ADD_RSP_28_POP_RBP_RET = (0xffffffff80b9da44 - KERNEL_TEXT),
+    .GAD_IRETQ = (0xFFFFFFFF8045480D - KERNEL_TEXT),
+    .GAD_POP_RAX_RET = (0xffffffff8040e9d0 - KERNEL_TEXT),
+    .GAD_POP_RDI_RET = (0xffffffff803f1d78 - KERNEL_TEXT),
+    .GAD_POP_RSI_RET = (0xffffffff803b28b0 - KERNEL_TEXT),
+    .GAD_POP_RDX_RET = (0xffffffff805cd6b4 - KERNEL_TEXT),
+    .GAD_POP_RCX_RET = (0xffffffff804e2231 - KERNEL_TEXT),
+    .GAD_POP_RSP_RET = (0xffffffff8045a850 - KERNEL_TEXT),
+    .GAD_WRMSR_RET = (0xffffffff80451d04 - KERNEL_TEXT),
+    // .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET not needed
+    // .HOOK_ACPI_WAKEUP_MACHDEP not needed
+    .KERNEL_CODE_CAVE = 0x500,
+    .FUN_PRINTF = (0xFFFFFFFF804B05F8 - KERNEL_TEXT),
+    // .FUN_HV_IOMMU_SET_BUFFERS not needed
+    // .FUN_HV_IOMM_WAIT_COMPLETION not needed
+    .FUN_SMP_RENDEZVOUS = (0xFFFFFFFF80CB6710 - KERNEL_TEXT),
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = (0xFFFFFFFF804BABC0 - KERNEL_TEXT),
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283D800,
+    .KERNEL_UART_OVERRIDE = (0xFFFFFFFF822C33F8 - KERNEL_TEXT),
+    .KERNEL_CFI_CHECK = (0xFFFFFFFF806857B0 - KERNEL_TEXT),
+    .G_VBIOS = (0xFFFFFFFF83EF7A40 - KERNEL_TEXT),
+    .FUN_TRANSMITTER_CONTROL = (0xFFFFFFFF80DB02D0 - KERNEL_TEXT),
+    .FUN_MP3_INITIALIZE = (0xFFFFFFFF80BCC020 - KERNEL_TEXT),
+    .FUN_MP3_INVOKE = (0xFFFFFFFF80BCADE0 - KERNEL_TEXT),
+    .PS5_WIFI_FW_OFFSET = (0xFFFFFFFF81655800 - KERNEL_TEXT),
+    .PS5_WIFI_FW_SIZE = 497636,
+};
 
-/*
- * FW 12.60 -- derived 2026-10-15 by signature. NOT BOOTED. 41 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_1100 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x39CD1F0,
+    .IDT = 0x3BA0300,
+    .COMMON_TSS = 0x3BA2FE0,
+    .FUN_MEMCPY = 0x2E8280,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA56D14,
+    .GAD_IRETQ = 0x26B627,
+    .GAD_POP_RAX_RET = 0x267A90,
+    .GAD_POP_RDI_RET = 0x24AE38,
+    .GAD_POP_RSI_RET = 0x20B970,
+    .GAD_POP_RDX_RET = 0x31B6C2,
+    .GAD_POP_RCX_RET = 0x3394AF,
+    .GAD_POP_RSP_RET = 0x2AF4D0,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x4D87D8,
+    .KERNEL_CODE_CAVE = 0xD2B000,
+    .FUN_PRINTF = 0x5358E0,
+    .FUN_SMP_RENDEZVOUS = 0xB73230,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x267A91,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847551,
+    .KERNEL_CFI_CHECK = 0x4EBF90,
+    .G_VBIOS = 0x3DB7A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC7F910,
+    .FUN_MP3_INITIALIZE = 0xA87C10,
+    .FUN_MP3_INVOKE = 0xA86830,
+    .HV_MP_STARTUP_CALL = 0xC87E20,
+    .MP_STARTUP_INIT_VECTOR = 0x311518,
+    .DATA_CAVE = 0x2D02000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A131E,
+    .GAD_STORE_RDI8_RCX_RET = 0x3CC88F,
+    .GAD_SET_DR7_RET = 0xA7B746,
+    .GAD_STORE_RCX_RAX_RET = 0x36249F,
+    .GAD_MOV_RAX_RDI_RET = 0x2B2F51,
+    .GAD_REP_MOVSB_RET = 0x3047A7,
+    .GAD_CLD_RET = 0x4A5D46,
+    .GAD_RET_TRAMP = 0x267A91,
+    .GAD_DBREG_RESUME = 0x2A5BB8,
+    .HV_EFI_MAP_ROOT = 0x3DCD0C8,
+    .PS5_WIFI_FW_OFFSET = 0x1586110,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+};
 
-/*
- * FW 12.70 -- derived 2026-10-15 by signature. NOT BOOTED. 41 fields.
- * Every method reproduces the recorded value on every firmware that has one;
- * see scratchpad/emit_full.py for the per-method scores.
- * ABSENT ON PURPOSE (no method reached 100%): KERNEL_UART_OVERRIDE, IOMMU_SOFTC,
- * HV_CODE_CAVE_PA, HV_HANDLE_VMEXIT_PA, KERNEL_SYM_DATA_CAVE,
- * KERNEL_SYM_MP_STARTUP_INIT_VECTOR, NVS_SIZETAB, PRELOAD_METADATA.
- * offsets_present() refuses a table missing what the route needs -- by design.
- */
+offset_list off_1120 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x39CD1F0,
+    .IDT = 0x3BA0300,
+    .COMMON_TSS = 0x3BA2FE0,
+    .FUN_MEMCPY = 0x2E8280,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA56D14,
+    .GAD_IRETQ = 0x26B627,
+    .GAD_POP_RAX_RET = 0x267A90,
+    .GAD_POP_RDI_RET = 0x24AE38,
+    .GAD_POP_RSI_RET = 0x20B970,
+    .GAD_POP_RDX_RET = 0x347ABB,
+    .GAD_POP_RCX_RET = 0x3394AF,
+    .GAD_POP_RSP_RET = 0x2AF4D0,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x4D87D8,
+    .KERNEL_CODE_CAVE = 0xD2B000,
+    .FUN_PRINTF = 0x5358E0,
+    .FUN_SMP_RENDEZVOUS = 0xB73230,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x267A91,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847551,
+    .KERNEL_CFI_CHECK = 0x4EBF90,
+    .G_VBIOS = 0x3DB7A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC7F910,
+    .FUN_MP3_INITIALIZE = 0xA87C10,
+    .FUN_MP3_INVOKE = 0xA86830,
+    .HV_MP_STARTUP_CALL = 0xC87E20,
+    .MP_STARTUP_INIT_VECTOR = 0x311518,
+    .DATA_CAVE = 0x2D02000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A131E,
+    .GAD_STORE_RDI8_RCX_RET = 0x3CC88F,
+    .GAD_SET_DR7_RET = 0xA7B746,
+    .GAD_STORE_RCX_RAX_RET = 0x36249F,
+    .GAD_MOV_RAX_RDI_RET = 0x2B2F51,
+    .GAD_REP_MOVSB_RET = 0x3047A7,
+    .GAD_CLD_RET = 0x4930E6,
+    .GAD_RET_TRAMP = 0x267A91,
+    .GAD_DBREG_RESUME = 0x2A5BB8,
+    .HV_EFI_MAP_ROOT = 0x3DCD0C8,
+    .PS5_WIFI_FW_OFFSET = 0x1586110,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+};
+
+offset_list off_1140 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x39CD1F0,
+    .IDT = 0x3BA0300,
+    .COMMON_TSS = 0x3BA2FE0,
+    .FUN_MEMCPY = 0x2E8C00,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA578D4,
+    .GAD_IRETQ = 0x26BFA7,
+    .GAD_POP_RAX_RET = 0x268410,
+    .GAD_POP_RDI_RET = 0x24B7B8,
+    .GAD_POP_RSI_RET = 0x20C2F0,
+    .GAD_POP_RDX_RET = 0x3484BB,
+    .GAD_POP_RCX_RET = 0x339EAF,
+    .GAD_POP_RSP_RET = 0x2AFE50,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x0,
+    .KERNEL_CODE_CAVE = 0xD2B000,
+    .FUN_PRINTF = 0x5362F0,
+    .FUN_SMP_RENDEZVOUS = 0xB73E20,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x268411,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847551,
+    .KERNEL_CFI_CHECK = 0x4EC9A0,
+    .G_VBIOS = 0x3DB7A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC80500,
+    .FUN_MP3_INITIALIZE = 0xA887D0,
+    .FUN_MP3_INVOKE = 0xA873F0,
+    .HV_MP_STARTUP_CALL = 0xC88A10,
+    .MP_STARTUP_INIT_VECTOR = 0x311E98,
+    .DATA_CAVE = 0x2D02000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A1C9E,
+    .GAD_STORE_RDI8_RCX_RET = 0x3CD28F,
+    .GAD_SET_DR7_RET = 0xA7C306,
+    .GAD_STORE_RCX_RAX_RET = 0x362E9F,
+    .GAD_MOV_RAX_RDI_RET = 0x2B38D1,
+    .GAD_REP_MOVSB_RET = 0x305127,
+    .GAD_CLD_RET = 0x3ED2D7,
+    .GAD_RET_TRAMP = 0x268411,
+    .GAD_DBREG_RESUME = 0x2A6538,
+    .HV_EFI_MAP_ROOT = 0x3DCD0C8,
+    .PS5_WIFI_FW_OFFSET = 0x15860D0,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+};
+
+offset_list off_1160 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x39CD1F0,
+    .IDT = 0x3BA0300,
+    .COMMON_TSS = 0x3BA2FE0,
+    .FUN_MEMCPY = 0x2E7E40,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA57354,
+    .GAD_IRETQ = 0x2AC22D,
+    .GAD_POP_RAX_RET = 0x338D2A,
+    .GAD_POP_RDI_RET = 0x289E0A,
+    .GAD_POP_RSI_RET = 0x8AAFB5,
+    .GAD_POP_RDX_RET = 0x3476DB,
+    .GAD_POP_RCX_RET = 0x339712,
+    .GAD_POP_RSP_RET = 0x33974D,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x42FB40,
+    // Five pages of NOP padding at the end of ktext.
+    .KERNEL_CODE_CAVE = 0xD2B000,
+    .FUN_PRINTF = 0x535A50,
+    .FUN_SMP_RENDEZVOUS = 0xB739D0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x316318,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847551,
+    // .KERNEL_UART_OVERRIDE not available
+    .KERNEL_CFI_CHECK = 0x4EBEB0,
+    .G_VBIOS = 0x3DB7A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC800C0,
+    .FUN_MP3_INITIALIZE = 0xA88270,
+    .FUN_MP3_INVOKE = 0xA86E70,
+    .PS5_WIFI_FW_OFFSET = 0x1585D90,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_MP_STARTUP_CALL = 0xC885D0,
+    .MP_STARTUP_INIT_VECTOR = 0x3110B8,
+    .DATA_CAVE = 0x2D02000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A0EDE,
+    .GAD_STORE_RDI8_RCX_RET = 0x3CC4AF,
+    .GAD_SET_DR7_RET = 0xA7BD86,
+    .GAD_STORE_RCX_RAX_RET = 0x3620BF,
+    .GAD_MOV_RAX_RDI_RET = 0xC5E5DA,
+    .GAD_REP_MOVSB_RET = 0x304367,
+    .GAD_CLD_RET = 0x462C1A,
+    .GAD_RET_TRAMP = 0x338D2B,
+    .GAD_DBREG_RESUME = 0x2A5778,
+    .NVS_SIGNATURE = 0x1A73930,
+    .HV_EFI_MAP_ROOT = 0x3DCD0C8,
+};
+
+offset_list off_0800 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38F7590,
+    .IDT = 0x3B23DF0,
+    .COMMON_TSS = 0x3B26AD0,
+    .FUN_MEMCPY = 0x282FA0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9A37C4,
+    .GAD_IRETQ = 0x24738D,
+    .GAD_POP_RAX_RET = 0x2027D0,
+    .GAD_POP_RDI_RET = 0x1E5B78,
+    .GAD_POP_RSI_RET = 0x1A66B0,
+    .GAD_POP_RDX_RET = 0x574C4A,
+    .GAD_POP_RCX_RET = 0x2D10C5,
+    .GAD_POP_RSP_RET = 0x24A1F0,
+    .KERNEL_CODE_CAVE = 0xC62000,
+    .FUN_PRINTF = 0x4C13E0,
+    .FUN_SMP_RENDEZVOUS = 0xABE8D0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x2027D1,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628457AE,
+    .KERNEL_CFI_CHECK = 0x4781D0,
+    .G_VBIOS = 0x3D3BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBBA930,
+    .FUN_MP3_INITIALIZE = 0x9D2A70,
+    .FUN_MP3_INVOKE = 0x376E50,
+    .HV_MP_STARTUP_CALL = 0xBC2C60,
+    .MP_STARTUP_INIT_VECTOR = 0x2A5860,
+    .DATA_CAVE = 0x2ACC000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x23C05E,
+    .GAD_STORE_RDI8_RCX_RET = 0x2749FF,
+    .GAD_SET_DR7_RET = 0x9C6616,
+    .GAD_STORE_RCX_RAX_RET = 0x3061A2,
+    .GAD_MOV_RAX_RDI_RET = 0x24DC71,
+    .GAD_REP_MOVSB_RET = 0x29F4C7,
+    .GAD_CLD_RET = 0x37BB87,
+    .GAD_RET_TRAMP = 0x2027D1,
+    .GAD_DBREG_RESUME = 0x2408F8,
+    .RESERVED_56 = 0x23FE92,
+    .RESERVED_57 = 1,
+    .PS5_WIFI_FW_OFFSET = 0x145B0B0,
+    .PS5_WIFI_FW_SIZE = 0x79924,
+    .HV_EFI_MAP_ROOT = 0x3D510B8,
+};
+
+offset_list off_0820 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38F75A0,
+    .IDT = 0x3B23DF0,
+    .COMMON_TSS = 0x3B26AD0,
+    .FUN_MEMCPY = 0x282FA0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9A4AD4,
+    .GAD_IRETQ = 0x24738D,
+    .GAD_POP_RAX_RET = 0x2027D0,
+    .GAD_POP_RDI_RET = 0x1E5B78,
+    .GAD_POP_RSI_RET = 0x1A66B0,
+    .GAD_POP_RDX_RET = 0x6720EC,
+    .GAD_POP_RCX_RET = 0x2D10C5,
+    .GAD_POP_RSP_RET = 0x2008F3,
+    .KERNEL_CODE_CAVE = 0xC63000,
+    .FUN_PRINTF = 0x4C18C0,
+    .FUN_SMP_RENDEZVOUS = 0xABFCD0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x2027D1,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628457AE,
+    .KERNEL_CFI_CHECK = 0x478690,
+    .G_VBIOS = 0x3D3BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBBBDC0,
+    .FUN_MP3_INITIALIZE = 0x9D3D80,
+    .FUN_MP3_INVOKE = 0x376E50,
+    .HV_MP_STARTUP_CALL = 0xBC40F0,
+    .MP_STARTUP_INIT_VECTOR = 0x2A5E28,
+    .DATA_CAVE = 0x2ACC000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x23C05E,
+    .GAD_STORE_RDI8_RCX_RET = 0x2749FF,
+    .GAD_SET_DR7_RET = 0x9C7926,
+    .GAD_STORE_RCX_RAX_RET = 0x3061A2,
+    .GAD_MOV_RAX_RDI_RET = 0x24DC71,
+    .GAD_REP_MOVSB_RET = 0x29F4C7,
+    .GAD_CLD_RET = 0x37BB87,
+    .GAD_RET_TRAMP = 0x2027D1,
+    .GAD_DBREG_RESUME = 0x2408F8,
+    .RESERVED_56 = 0x23FE92,
+    .RESERVED_57 = 1,
+    .PS5_WIFI_FW_OFFSET = 0x145B170,
+    .PS5_WIFI_FW_SIZE = 0x79924,
+    .HV_EFI_MAP_ROOT = 0x3D510B8,
+};
+
+offset_list off_0840 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38F75A0,
+    .IDT = 0x3B23DF0,
+    .COMMON_TSS = 0x3B26AD0,
+    .FUN_MEMCPY = 0x2842A0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9A4D64,
+    .GAD_IRETQ = 0x24868D,
+    .GAD_POP_RAX_RET = 0x203AD0,
+    .GAD_POP_RDI_RET = 0x1E6E78,
+    .GAD_POP_RSI_RET = 0x1A79B0,
+    .GAD_POP_RDX_RET = 0x386152,
+    .GAD_POP_RCX_RET = 0x2D23C5,
+    .GAD_POP_RSP_RET = 0x24B4F0,
+    .KERNEL_CODE_CAVE = 0xC63000,
+    .FUN_PRINTF = 0x4C2C30,
+    .FUN_SMP_RENDEZVOUS = 0xABFF60,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x203AD1,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628457AE,
+    .KERNEL_CFI_CHECK = 0x479990,
+    .G_VBIOS = 0x3D3BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBBC030,
+    .FUN_MP3_INITIALIZE = 0x9D4010,
+    .FUN_MP3_INVOKE = 0x378150,
+    .HV_MP_STARTUP_CALL = 0xBC4360,
+    .MP_STARTUP_INIT_VECTOR = 0x2A9AC8,
+    .DATA_CAVE = 0x2ACC000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x23D35E,
+    .GAD_STORE_RDI8_RCX_RET = 0x275CFF,
+    .GAD_SET_DR7_RET = 0x9C7BB6,
+    .GAD_STORE_RCX_RAX_RET = 0x3074A2,
+    .GAD_MOV_RAX_RDI_RET = 0x24EF71,
+    .GAD_REP_MOVSB_RET = 0x2A07C7,
+    .GAD_CLD_RET = 0x37CE87,
+    .GAD_RET_TRAMP = 0x203AD1,
+    .GAD_DBREG_RESUME = 0x241BF8,
+    .RESERVED_56 = 0x241192,
+    .RESERVED_57 = 1,
+    .PS5_WIFI_FW_OFFSET = 0x145B170,
+    .PS5_WIFI_FW_SIZE = 0x79924,
+    .HV_EFI_MAP_ROOT = 0x3D510B8,
+};
+
+offset_list off_0860 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38F75A0,
+    .IDT = 0x3B23DF0,
+    .COMMON_TSS = 0x3B26AD0,
+    .FUN_MEMCPY = 0x2842A0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9A4F44,
+    .GAD_IRETQ = 0x24868D,
+    .GAD_POP_RAX_RET = 0x203AD0,
+    .GAD_POP_RDI_RET = 0x1E6E78,
+    .GAD_POP_RSI_RET = 0x1A79B0,
+    .GAD_POP_RDX_RET = 0x386152,
+    .GAD_POP_RCX_RET = 0x2D23C5,
+    .GAD_POP_RSP_RET = 0x24B4F0,
+    .KERNEL_CODE_CAVE = 0xC63000,
+    .FUN_PRINTF = 0x4C2C30,
+    .FUN_SMP_RENDEZVOUS = 0xAC01E0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x203AD1,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628457AE,
+    .KERNEL_CFI_CHECK = 0x479990,
+    .G_VBIOS = 0x3D3BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBBC2B0,
+    .FUN_MP3_INITIALIZE = 0x9D41F0,
+    .FUN_MP3_INVOKE = 0x378150,
+    .HV_MP_STARTUP_CALL = 0xBC45E0,
+    .MP_STARTUP_INIT_VECTOR = 0x2A8450,
+    .DATA_CAVE = 0x2ACC000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x23D35E,
+    .GAD_STORE_RDI8_RCX_RET = 0x275CFF,
+    .GAD_SET_DR7_RET = 0x9C7D96,
+    .GAD_STORE_RCX_RAX_RET = 0x3074A2,
+    .GAD_MOV_RAX_RDI_RET = 0x24EF71,
+    .GAD_REP_MOVSB_RET = 0x2A07C7,
+    .GAD_CLD_RET = 0x2BE410,
+    .GAD_RET_TRAMP = 0x203AD1,
+    .GAD_DBREG_RESUME = 0x241BF8,
+    .RESERVED_56 = 0x241192,
+    .RESERVED_57 = 1,
+    .PS5_WIFI_FW_OFFSET = 0x145B170,
+    .PS5_WIFI_FW_SIZE = 0x79924,
+    .HV_EFI_MAP_ROOT = 0x3D510B8,
+};
+
+offset_list off_0900 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x3807560,
+    .IDT = 0x3A34300,
+    .COMMON_TSS = 0x3A36FE0,
+    .FUN_MEMCPY = 0x288D80,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9C6DF4,
+    .GAD_IRETQ = 0x24D16D,
+    .GAD_POP_RAX_RET = 0x208590,
+    .GAD_POP_RDI_RET = 0x1EB938,
+    .GAD_POP_RSI_RET = 0x1AC470,
+    .GAD_POP_RDX_RET = 0x3FA6A8,
+    .GAD_POP_RCX_RET = 0x2D8025,
+    .GAD_POP_RSP_RET = 0x24FFD0,
+    .KERNEL_CODE_CAVE = 0xC91000,
+    .FUN_PRINTF = 0x4CB790,
+    .FUN_SMP_RENDEZVOUS = 0xAE0FA0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x208591,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6284709E,
+    .KERNEL_CFI_CHECK = 0x483150,
+    .G_VBIOS = 0x3C4BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBE8A70,
+    .FUN_MP3_INITIALIZE = 0x9F71F0,
+    .FUN_MP3_INVOKE = 0x37F040,
+    .HV_MP_STARTUP_CALL = 0xBF1050,
+    .MP_STARTUP_INIT_VECTOR = 0x2AC318,
+    .DATA_CAVE = 0x2AC3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x241E1E,
+    .GAD_STORE_RDI8_RCX_RET = 0x27A7DF,
+    .GAD_SET_DR7_RET = 0x9EAB96,
+    .GAD_STORE_RCX_RAX_RET = 0x30D152,
+    .GAD_MOV_RAX_RDI_RET = 0x253A51,
+    .GAD_REP_MOVSB_RET = 0x2A52A7,
+    .GAD_CLD_RET = 0x321594,
+    .GAD_RET_TRAMP = 0x208591,
+    .GAD_DBREG_RESUME = 0x2466B8,
+    .RESERVED_56 = 0x245C52,
+    .PS5_WIFI_FW_OFFSET = 0x14E2630,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C610B8,
+};
+
+offset_list off_0920 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x3807100,
+    .IDT = 0x3A34300,
+    .COMMON_TSS = 0x3A36FE0,
+    .FUN_MEMCPY = 0x288D80,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9C6E14,
+    .GAD_IRETQ = 0x24D16D,
+    .GAD_POP_RAX_RET = 0x208590,
+    .GAD_POP_RDI_RET = 0x1EB938,
+    .GAD_POP_RSI_RET = 0x1AC470,
+    .GAD_POP_RDX_RET = 0x3AB732,
+    .GAD_POP_RCX_RET = 0x2D8015,
+    .GAD_POP_RSP_RET = 0x24FFD0,
+    .KERNEL_CODE_CAVE = 0xC91000,
+    .FUN_PRINTF = 0x4CB450,
+    .FUN_SMP_RENDEZVOUS = 0xAE0FC0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x208591,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6284709E,
+    .KERNEL_CFI_CHECK = 0x483140,
+    .G_VBIOS = 0x3C4BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBE8AB0,
+    .FUN_MP3_INITIALIZE = 0x9F7210,
+    .FUN_MP3_INVOKE = 0x37F030,
+    .HV_MP_STARTUP_CALL = 0xBF1090,
+    .MP_STARTUP_INIT_VECTOR = 0x2AB4D0,
+    .DATA_CAVE = 0x2AC3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x241E1E,
+    .GAD_STORE_RDI8_RCX_RET = 0x27A7DF,
+    .GAD_SET_DR7_RET = 0x9EABB6,
+    .GAD_STORE_RCX_RAX_RET = 0x30D142,
+    .GAD_MOV_RAX_RDI_RET = 0x253A51,
+    .GAD_REP_MOVSB_RET = 0x2A52A7,
+    .GAD_CLD_RET = 0x383BC7,
+    .GAD_RET_TRAMP = 0x208591,
+    .GAD_DBREG_RESUME = 0x2466B8,
+    .RESERVED_56 = 0x245C52,
+    .PS5_WIFI_FW_OFFSET = 0x14E29D0,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C610B8,
+};
+
+offset_list off_0940 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x3807100,
+    .IDT = 0x3A34300,
+    .COMMON_TSS = 0x3A36FE0,
+    .FUN_MEMCPY = 0x288D80,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9C7384,
+    .GAD_IRETQ = 0x24D16D,
+    .GAD_POP_RAX_RET = 0x208590,
+    .GAD_POP_RDI_RET = 0x1EB938,
+    .GAD_POP_RSI_RET = 0x1AC470,
+    .GAD_POP_RDX_RET = 0x2DA392,
+    .GAD_POP_RCX_RET = 0x2D80F5,
+    .GAD_POP_RSP_RET = 0x24FFD0,
+    .KERNEL_CODE_CAVE = 0xC92000,
+    .FUN_PRINTF = 0x4CB5E0,
+    .FUN_SMP_RENDEZVOUS = 0xAE1530,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x208591,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6284709E,
+    .KERNEL_CFI_CHECK = 0x4832D0,
+    .G_VBIOS = 0x3C4BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBE9020,
+    .FUN_MP3_INITIALIZE = 0x9F7780,
+    .FUN_MP3_INVOKE = 0x37F1C0,
+    .HV_MP_STARTUP_CALL = 0xBF1600,
+    .MP_STARTUP_INIT_VECTOR = 0x2AB958,
+    .DATA_CAVE = 0x2AC3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x241E1E,
+    .GAD_STORE_RDI8_RCX_RET = 0x27A7DF,
+    .GAD_SET_DR7_RET = 0x9EB126,
+    .GAD_STORE_RCX_RAX_RET = 0x30D222,
+    .GAD_MOV_RAX_RDI_RET = 0x253A51,
+    .GAD_REP_MOVSB_RET = 0x2A52A7,
+    .GAD_CLD_RET = 0x383D57,
+    .GAD_RET_TRAMP = 0x208591,
+    .GAD_DBREG_RESUME = 0x2466B8,
+    .RESERVED_56 = 0x245C52,
+    .PS5_WIFI_FW_OFFSET = 0x14E2A50,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C610B8,
+};
+
+offset_list off_0960 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x3807100,
+    .IDT = 0x3A34300,
+    .COMMON_TSS = 0x3A36FE0,
+    .FUN_MEMCPY = 0x288D80,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9C7564,
+    .GAD_IRETQ = 0x24D16D,
+    .GAD_POP_RAX_RET = 0x208590,
+    .GAD_POP_RDI_RET = 0x1EB938,
+    .GAD_POP_RSI_RET = 0x1AC470,
+    .GAD_POP_RDX_RET = 0x513BA2,
+    .GAD_POP_RCX_RET = 0x2D80F5,
+    .GAD_POP_RSP_RET = 0x24FFD0,
+    .KERNEL_CODE_CAVE = 0xC92000,
+    .FUN_PRINTF = 0x4CB6E0,
+    .FUN_SMP_RENDEZVOUS = 0xAE1710,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x208591,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628470DE,
+    .KERNEL_CFI_CHECK = 0x483300,
+    .G_VBIOS = 0x3C4BA40,
+    .FUN_TRANSMITTER_CONTROL = 0xBE9200,
+    .FUN_MP3_INITIALIZE = 0x9F7960,
+    .FUN_MP3_INVOKE = 0x37F1C0,
+    .HV_MP_STARTUP_CALL = 0xBF1730,
+    .MP_STARTUP_INIT_VECTOR = 0x2ACA20,
+    .DATA_CAVE = 0x2AC3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x241E1E,
+    .GAD_STORE_RDI8_RCX_RET = 0x27A7DF,
+    .GAD_SET_DR7_RET = 0x9EB306,
+    .GAD_STORE_RCX_RAX_RET = 0x30D222,
+    .GAD_MOV_RAX_RDI_RET = 0x253A51,
+    .GAD_REP_MOVSB_RET = 0x2A52A7,
+    .GAD_CLD_RET = 0x383D57,
+    .GAD_RET_TRAMP = 0x208591,
+    .GAD_DBREG_RESUME = 0x2466B8,
+    .RESERVED_56 = 0x245C52,
+    .PS5_WIFI_FW_OFFSET = 0x14E2A50,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C610B8,
+};
+
+offset_list off_1000 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38491E0,
+    .IDT = 0x3A1C300,
+    .COMMON_TSS = 0x3A1EFE0,
+    .FUN_MEMCPY = 0x28D100,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E3B64,
+    .GAD_IRETQ = 0x2514ED,
+    .GAD_POP_RAX_RET = 0x20C910,
+    .GAD_POP_RDI_RET = 0x1EFCB8,
+    .GAD_POP_RSI_RET = 0x1B07F0,
+    .GAD_POP_RDX_RET = 0x5008C8,
+    .GAD_POP_RCX_RET = 0x2DDC81,
+    .GAD_POP_RSP_RET = 0x254350,
+    .KERNEL_CODE_CAVE = 0xCB4000,
+    .FUN_PRINTF = 0x4D5F60,
+    .FUN_SMP_RENDEZVOUS = 0xAFF860,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x20C911,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847488,
+    .KERNEL_CFI_CHECK = 0x48CF10,
+    .G_VBIOS = 0x3C33A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC0A710,
+    .FUN_MP3_INITIALIZE = 0xA14520,
+    .FUN_MP3_INVOKE = 0xA13150,
+    .HV_MP_STARTUP_CALL = 0xC12D30,
+    .MP_STARTUP_INIT_VECTOR = 0x2AFA28,
+    .DATA_CAVE = 0x2AE3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x24619E,
+    .GAD_STORE_RDI8_RCX_RET = 0x36E9CB,
+    .GAD_SET_DR7_RET = 0xA07D86,
+    .GAD_STORE_RCX_RAX_RET = 0x3067AF,
+    .GAD_MOV_RAX_RDI_RET = 0x257DD1,
+    .GAD_REP_MOVSB_RET = 0x2A9627,
+    .GAD_CLD_RET = 0x32D338,
+    .GAD_RET_TRAMP = 0x20C911,
+    .GAD_DBREG_RESUME = 0x24AA38,
+    .PS5_WIFI_FW_OFFSET = 0x1508E40,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C490B8,
+};
+
+offset_list off_1001 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38491E0,
+    .IDT = 0x3A1C300,
+    .COMMON_TSS = 0x3A1EFE0,
+    .FUN_MEMCPY = 0x28D100,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E3B64,
+    .GAD_IRETQ = 0x2514ED,
+    .GAD_POP_RAX_RET = 0x20C910,
+    .GAD_POP_RDI_RET = 0x1EFCB8,
+    .GAD_POP_RSI_RET = 0x1B07F0,
+    .GAD_POP_RDX_RET = 0x427E69,
+    .GAD_POP_RCX_RET = 0x2DDC81,
+    .GAD_POP_RSP_RET = 0x254350,
+    .KERNEL_CODE_CAVE = 0xCB4000,
+    .FUN_PRINTF = 0x4D5F60,
+    .FUN_SMP_RENDEZVOUS = 0xAFF860,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x20C911,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847488,
+    .KERNEL_CFI_CHECK = 0x48CF10,
+    .G_VBIOS = 0x3C33A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC0A710,
+    .FUN_MP3_INITIALIZE = 0xA14520,
+    .FUN_MP3_INVOKE = 0xA13150,
+    .HV_MP_STARTUP_CALL = 0xC12D30,
+    .MP_STARTUP_INIT_VECTOR = 0x2AFBB0,
+    .DATA_CAVE = 0x2AE3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x24619E,
+    .GAD_STORE_RDI8_RCX_RET = 0x36E9CB,
+    .GAD_SET_DR7_RET = 0xA07D86,
+    .GAD_STORE_RCX_RAX_RET = 0x3067AF,
+    .GAD_MOV_RAX_RDI_RET = 0x257DD1,
+    .GAD_REP_MOVSB_RET = 0x2A9627,
+    .GAD_CLD_RET = 0x3DB600,
+    .GAD_RET_TRAMP = 0x20C911,
+    .GAD_DBREG_RESUME = 0x24AA38,
+    .PS5_WIFI_FW_OFFSET = 0x1508E40,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C490B8,
+};
+
+offset_list off_1020 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38491E0,
+    .IDT = 0x3A1C300,
+    .COMMON_TSS = 0x3A1EFE0,
+    .FUN_MEMCPY = 0x28D100,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E3D84,
+    .GAD_IRETQ = 0x2514ED,
+    .GAD_POP_RAX_RET = 0x20C910,
+    .GAD_POP_RDI_RET = 0x1EFCB8,
+    .GAD_POP_RSI_RET = 0x1B07F0,
+    .GAD_POP_RDX_RET = 0x492E9A,
+    .GAD_POP_RCX_RET = 0x2DDC81,
+    .GAD_POP_RSP_RET = 0x254350,
+    .KERNEL_CODE_CAVE = 0xCB4000,
+    .FUN_PRINTF = 0x4D5F50,
+    .FUN_SMP_RENDEZVOUS = 0xAFFA80,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x20C911,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847488,
+    .KERNEL_CFI_CHECK = 0x48CF00,
+    .G_VBIOS = 0x3C33A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC0A9D0,
+    .FUN_MP3_INITIALIZE = 0xA14740,
+    .FUN_MP3_INVOKE = 0xA13370,
+    .HV_MP_STARTUP_CALL = 0xC12FF0,
+    .MP_STARTUP_INIT_VECTOR = 0x2B1898,
+    .DATA_CAVE = 0x2AE3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x24619E,
+    .GAD_STORE_RDI8_RCX_RET = 0x36E9CB,
+    .GAD_SET_DR7_RET = 0xA07FA6,
+    .GAD_STORE_RCX_RAX_RET = 0x3067AF,
+    .GAD_MOV_RAX_RDI_RET = 0x257DD1,
+    .GAD_REP_MOVSB_RET = 0x2A9627,
+    .GAD_CLD_RET = 0x409EC0,
+    .GAD_RET_TRAMP = 0x20C911,
+    .GAD_DBREG_RESUME = 0x24AA38,
+    .PS5_WIFI_FW_OFFSET = 0x1508EC0,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C490B8,
+};
+
+offset_list off_1040 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38491E0,
+    .IDT = 0x3A1C300,
+    .COMMON_TSS = 0x3A1EFE0,
+    .FUN_MEMCPY = 0x28D100,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E3D84,
+    .GAD_IRETQ = 0x2514ED,
+    .GAD_POP_RAX_RET = 0x20C910,
+    .GAD_POP_RDI_RET = 0x1EFCB8,
+    .GAD_POP_RSI_RET = 0x1B07F0,
+    .GAD_POP_RDX_RET = 0x459DFF,
+    .GAD_POP_RCX_RET = 0x2DDC81,
+    .GAD_POP_RSP_RET = 0x254350,
+    .KERNEL_CODE_CAVE = 0xCB4000,
+    .FUN_PRINTF = 0x4D5F50,
+    .FUN_SMP_RENDEZVOUS = 0xAFFA80,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x20C911,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847488,
+    .KERNEL_CFI_CHECK = 0x48CF00,
+    .G_VBIOS = 0x3C33A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC0A9D0,
+    .FUN_MP3_INITIALIZE = 0xA14740,
+    .FUN_MP3_INVOKE = 0xA13370,
+    .HV_MP_STARTUP_CALL = 0xC12FF0,
+    .MP_STARTUP_INIT_VECTOR = 0x2B3AC0,
+    .DATA_CAVE = 0x2AE3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x24619E,
+    .GAD_STORE_RDI8_RCX_RET = 0x36E9CB,
+    .GAD_SET_DR7_RET = 0xA07FA6,
+    .GAD_STORE_RCX_RAX_RET = 0x3067AF,
+    .GAD_MOV_RAX_RDI_RET = 0x257DD1,
+    .GAD_REP_MOVSB_RET = 0x2A9627,
+    .GAD_CLD_RET = 0x409EC0,
+    .GAD_RET_TRAMP = 0x20C911,
+    .GAD_DBREG_RESUME = 0x24AA38,
+    .PS5_WIFI_FW_OFFSET = 0x1508EC0,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HV_EFI_MAP_ROOT = 0x3C490B8,
+};
+
+offset_list off_1060 = {
+    .VMSPACE_VM_VMID = 0x1E4,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .ACPIGBL_FACS = 0x38491E0,
+    .IDT = 0x3A1C300,
+    .COMMON_TSS = 0x3A1EFE0,
+    .FUN_MEMCPY = 0x28E300,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E4F84,
+    .GAD_IRETQ = 0x2526ED,
+    .GAD_POP_RAX_RET = 0x20DB10,
+    .GAD_POP_RDI_RET = 0x1F0EB8,
+    .GAD_POP_RSI_RET = 0x1B19F0,
+    .GAD_POP_RDX_RET = 0x3CF802,
+    .GAD_POP_RCX_RET = 0x2DEE81,
+    .GAD_POP_RSP_RET = 0x255550,
+    .KERNEL_CODE_CAVE = 0xCB4000,
+    .FUN_PRINTF = 0x4D7150,
+    .FUN_SMP_RENDEZVOUS = 0xAFFA60,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x2B82B8,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x628474A8,
+    .KERNEL_CFI_CHECK = 0x48E100,
+    .G_VBIOS = 0x3C33A40,
+    .FUN_TRANSMITTER_CONTROL = 0xC0A9B0,
+    .FUN_MP3_INITIALIZE = 0xA15940,
+    .FUN_MP3_INVOKE = 0xA14570,
+    .HV_MP_STARTUP_CALL = 0xC12FD0,
+    .MP_STARTUP_INIT_VECTOR = 0x2B0CE8,
+    .DATA_CAVE = 0x2AE3000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x24739E,
+    .GAD_STORE_RDI8_RCX_RET = 0x36FBCB,
+    .GAD_SET_DR7_RET = 0xA091A6,
+    .GAD_STORE_RCX_RAX_RET = 0x3079AF,
+    .GAD_MOV_RAX_RDI_RET = 0x258FD1,
+    .GAD_REP_MOVSB_RET = 0x2AA827,
+    .GAD_CLD_RET = 0x2A6AA8,
+    .GAD_RET_TRAMP = 0x20DB11,
+    .GAD_DBREG_RESUME = 0x24BC38,
+    .PS5_WIFI_FW_OFFSET = 0x1508EC0,
+    .PS5_WIFI_FW_SIZE = 0x799BC,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3D274F,
+
+    .HV_EFI_MAP_ROOT = 0x3C490B8,
+};
+
+/* off_1200: generated from the Wigglez 12xx AIO build. */
+offset_list off_1200 = {
+    .IOMMU_SOFTC = 0x3599510,
+    .VMSPACE_VM_VMID = 0x1FC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2E7E570,
+    .ACPIGBL_FACS = 0x3A04C80,
+    .IDT = 0x3BD8300,
+    .COMMON_TSS = 0x3BDAFE0,
+    .FUN_MEMCPY = 0x2EF240,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA70E54,
+    .GAD_IRETQ = 0x2B362D,
+    .GAD_POP_RAX_RET = 0x26EA50,
+    .GAD_POP_RDI_RET = 0x251DF8,
+    .GAD_POP_RSI_RET = 0x212930,
+    .GAD_POP_RDX_RET = 0x34F66B,
+    .GAD_POP_RCX_RET = 0x341252,
+    .GAD_POP_RSP_RET = 0x2B6490,
+    .GAD_WRMSR_RET = 0x2B0B24,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x47EACA,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x43C2D0,
+    .KERNEL_CODE_CAVE = 0xD41000,
+    .FUN_PRINTF = 0x544310,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC9DCF0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC9DC30,
+    .FUN_SMP_RENDEZVOUS = 0xB8FCE0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x31DB30,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283374D,
+    .KERNEL_UART_OVERRIDE = 0x2275CD8,
+    .KERNEL_CFI_CHECK = 0x4F9FD0,
+    .G_VBIOS = 0x3DF79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC95BF0,
+    .FUN_MP3_INITIALIZE = 0xAA2140,
+    .FUN_MP3_INVOKE = 0xAA0D40,
+    .PS5_WIFI_FW_OFFSET = 0x15A83F0,
+    .PS5_WIFI_FW_SIZE = 0x799C0,
+    .HV_MP_STARTUP_CALL = 0xC9E0D0,
+    .MP_STARTUP_INIT_VECTOR = 0x3187F8,
+    .DATA_CAVE = 0x2DB5000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A82DE,
+    .GAD_POP_R8_RET = 0xC18E0D,
+    .GAD_STORE_RCX_R8_RET = 0x51E819,
+    .GAD_STORE_RDI8_RCX_RET = 0x3D685F,
+    .GAD_OR_RCX_EAX_RET = 0x899F90,
+    .GAD_SET_DR7_RET = 0xA95BA6,
+    .GAD_STORE_RCX_RDX_RET = 0x8BBBE5,
+    .GAD_STORE_RCX_RAX_RET = 0x369F6F,
+    .GAD_MOV_RAX_RSI_RET = 0x971FD4,
+    .GAD_MOV_RAX_RDI_RET = 0x2B9F11,
+    .GAD_REP_MOVSB_RET = 0x30B847,
+    .GAD_CLD_RET = 0x3807D0,
+    .GAD_RET_TRAMP = 0x26EA51,
+    .GAD_DBREG_RESUME = 0x2ACB78,
+    .NVS_SIGNATURE = 0x1A8A900,
+    .HV_EFI_MAP_ROOT = 0x3E0D070,
+};
+
+/* off_1202: generated from the Wigglez 12xx AIO build. */
+offset_list off_1202 = {
+    .IOMMU_SOFTC = 0x3599510,
+    .VMSPACE_VM_VMID = 0x1FC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2E7E570,
+    .ACPIGBL_FACS = 0x3A04C80,
+    .IDT = 0x3BD8300,
+    .COMMON_TSS = 0x3BDAFE0,
+    .FUN_MEMCPY = 0x2EF240,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA70E64,
+    .GAD_IRETQ = 0x2B362D,
+    .GAD_POP_RAX_RET = 0x26EA50,
+    .GAD_POP_RDI_RET = 0x251DF8,
+    .GAD_POP_RSI_RET = 0x212930,
+    .GAD_POP_RDX_RET = 0x34F66B,
+    .GAD_POP_RCX_RET = 0x341252,
+    .GAD_POP_RSP_RET = 0x2B6490,
+    .GAD_WRMSR_RET = 0x2B0B24,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x47EACA,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x43C2D0,
+    .KERNEL_CODE_CAVE = 0xD41000,
+    .FUN_PRINTF = 0x544310,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC9DCF0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC9DC30,
+    .FUN_SMP_RENDEZVOUS = 0xB8FCE0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x31DB30,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283374D,
+    .KERNEL_UART_OVERRIDE = 0x2275CD8,
+    .KERNEL_CFI_CHECK = 0x4F9FD0,
+    .G_VBIOS = 0x3DF79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC95BF0,
+    .FUN_MP3_INITIALIZE = 0xAA2150,
+    .FUN_MP3_INVOKE = 0xAA0D50,
+    .PS5_WIFI_FW_OFFSET = 0x15A83F0,
+    .PS5_WIFI_FW_SIZE = 0x799C0,
+    .HV_MP_STARTUP_CALL = 0xC9E0D0,
+    .MP_STARTUP_INIT_VECTOR = 0x3187F8,
+    .DATA_CAVE = 0x2DB5000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A82DE,
+    .GAD_POP_R8_RET = 0xC18E0D,
+    .GAD_STORE_RCX_R8_RET = 0x51E819,
+    .GAD_STORE_RDI8_RCX_RET = 0x3D685F,
+    .GAD_OR_RCX_EAX_RET = 0x899FA0,
+    .GAD_SET_DR7_RET = 0xA95BB6,
+    .GAD_STORE_RCX_RDX_RET = 0x8BBBF5,
+    .GAD_STORE_RCX_RAX_RET = 0x369F6F,
+    .GAD_MOV_RAX_RSI_RET = 0x971FE4,
+    .GAD_MOV_RAX_RDI_RET = 0x2B9F11,
+    .GAD_REP_MOVSB_RET = 0x30B847,
+    .GAD_CLD_RET = 0x36A6B0,
+    .GAD_RET_TRAMP = 0x26EA51,
+    .GAD_DBREG_RESUME = 0x2ACB78,
+    .NVS_SIGNATURE = 0x1A8A900,
+    .HV_EFI_MAP_ROOT = 0x3E0D070,
+};
+
+/* off_1240: generated from the Wigglez 12xx AIO build. */
+offset_list off_1240 = {
+    .IOMMU_SOFTC = 0x3599510,
+    .VMSPACE_VM_VMID = 0x1FC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2E7E570,
+    .ACPIGBL_FACS = 0x3A04C80,
+    .IDT = 0x3BD8300,
+    .COMMON_TSS = 0x3BDAFE0,
+    .FUN_MEMCPY = 0x2EF0C0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA70CE4,
+    .GAD_IRETQ = 0x2B34AD,
+    .GAD_POP_RAX_RET = 0x26E8D0,
+    .GAD_POP_RDI_RET = 0x251C78,
+    .GAD_POP_RSI_RET = 0x2127B0,
+    .GAD_POP_RDX_RET = 0x34F4EB,
+    .GAD_POP_RCX_RET = 0x3410D2,
+    .GAD_POP_RSP_RET = 0x2B6310,
+    .GAD_WRMSR_RET = 0x2B09A4,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x47E94A,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x43C150,
+    .KERNEL_CODE_CAVE = 0xD41000,
+    .FUN_PRINTF = 0x544190,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC9DB70,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC9DAB0,
+    .FUN_SMP_RENDEZVOUS = 0xB8FB60,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x31D9B0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283374D,
+    .KERNEL_UART_OVERRIDE = 0x2275CD8,
+    .KERNEL_CFI_CHECK = 0x4F9E50,
+    .G_VBIOS = 0x3DF79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC95A70,
+    .FUN_MP3_INITIALIZE = 0xAA1FD0,
+    .FUN_MP3_INVOKE = 0xAA0BD0,
+    .PS5_WIFI_FW_OFFSET = 0x15A83F0,
+    .PS5_WIFI_FW_SIZE = 0x799C0,
+    .HV_MP_STARTUP_CALL = 0xC9DF50,
+    .MP_STARTUP_INIT_VECTOR = 0x318678,
+    .DATA_CAVE = 0x2DB5000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A815E,
+    .GAD_POP_R8_RET = 0xC18C8D,
+    .GAD_STORE_RCX_R8_RET = 0x51E699,
+    .GAD_STORE_RDI8_RCX_RET = 0x3D66DF,
+    .GAD_OR_RCX_EAX_RET = 0x899E20,
+    .GAD_SET_DR7_RET = 0xA95A36,
+    .GAD_STORE_RCX_RDX_RET = 0x8BBA75,
+    .GAD_STORE_RCX_RAX_RET = 0x369DEF,
+    .GAD_MOV_RAX_RSI_RET = 0x971E64,
+    .GAD_MOV_RAX_RDI_RET = 0x2B9D91,
+    .GAD_REP_MOVSB_RET = 0x30B6C7,
+    .GAD_CLD_RET = 0x36A530,
+    .GAD_RET_TRAMP = 0x26E8D1,
+    .GAD_DBREG_RESUME = 0x2AC9F8,
+    .NVS_SIGNATURE = 0x1A8A900,
+    .HV_EFI_MAP_ROOT = 0x3E0D070,
+};
+
+/* off_1270: generated from the Wigglez 12xx AIO build. */
+offset_list off_1270 = {
+    .IOMMU_SOFTC = 0x3599510,
+    .VMSPACE_VM_VMID = 0x1FC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2E7E570,
+    .ACPIGBL_FACS = 0x3A04C80,
+    .IDT = 0x3BD8300,
+    .COMMON_TSS = 0x3BDAFE0,
+    .FUN_MEMCPY = 0x2EF0C0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0xA70D44,
+    .GAD_IRETQ = 0x2B34AD,
+    .GAD_POP_RAX_RET = 0x26E8D0,
+    .GAD_POP_RDI_RET = 0x251C78,
+    .GAD_POP_RSI_RET = 0x2127B0,
+    .GAD_POP_RDX_RET = 0x34F4EB,
+    .GAD_POP_RCX_RET = 0x3410D2,
+    .GAD_POP_RSP_RET = 0x2B6310,
+    .GAD_WRMSR_RET = 0x2B09A4,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x47E94A,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x43C150,
+    .KERNEL_CODE_CAVE = 0xD41000,
+    .FUN_PRINTF = 0x544190,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC9DBD0,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC9DB10,
+    .FUN_SMP_RENDEZVOUS = 0xB8FBC0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x31D9B0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x6283374D,
+    .KERNEL_UART_OVERRIDE = 0x2275CD8,
+    .KERNEL_CFI_CHECK = 0x4F9E50,
+    .G_VBIOS = 0x3DF79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC95AD0,
+    .FUN_MP3_INITIALIZE = 0xAA2030,
+    .FUN_MP3_INVOKE = 0xAA0C30,
+    .PS5_WIFI_FW_OFFSET = 0x15A83F0,
+    .PS5_WIFI_FW_SIZE = 0x799C0,
+    .HV_MP_STARTUP_CALL = 0xC9DFB0,
+    .MP_STARTUP_INIT_VECTOR = 0x318678,
+    .DATA_CAVE = 0x2DB5000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2A815E,
+    .GAD_POP_R8_RET = 0xC18CED,
+    .GAD_STORE_RCX_R8_RET = 0x51E699,
+    .GAD_STORE_RDI8_RCX_RET = 0x3D66DF,
+    .GAD_OR_RCX_EAX_RET = 0x899E20,
+    .GAD_SET_DR7_RET = 0xA95A96,
+    .GAD_STORE_RCX_RDX_RET = 0x8BBA75,
+    .GAD_STORE_RCX_RAX_RET = 0x369DEF,
+    .GAD_MOV_RAX_RSI_RET = 0x971E64,
+    .GAD_MOV_RAX_RDI_RET = 0x2B9D91,
+    .GAD_REP_MOVSB_RET = 0x30B6C7,
+    .GAD_CLD_RET = 0x36A530,
+    .GAD_RET_TRAMP = 0x26E8D1,
+    .GAD_DBREG_RESUME = 0x2AC9F8,
+    .NVS_SIGNATURE = 0x1A8A900,
+    .HV_EFI_MAP_ROOT = 0x3E0D070,
+};
+
+offset_list off_1300 = {
+    .IOMMU_SOFTC = 0x3532CF0,
+    .VMSPACE_VM_VMID = 0x1EC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2ED6570,
+    .ACPIGBL_FACS = 0x39B5390,
+    .IDT = 0x3B90300,
+    .COMMON_TSS = 0x3B92FE0,
+    .FUN_MEMCPY = 0x259070,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9DAC44,
+    .GAD_IRETQ = 0x257AFD,
+    .GAD_POP_RAX_RET = 0x291231,
+    .GAD_POP_RDI_RET = 0x31A4A3,
+    .GAD_POP_RSI_RET = 0x2A46ED,
+    .GAD_POP_RDX_RET = 0x2A0D3B,
+    .GAD_POP_RCX_RET = 0x291842,
+    .GAD_POP_RSP_RET = 0x291BD2,
+    .GAD_WRMSR_RET = 0x254FF4,
+    .HOOK_ACPI_WAKEUP_MACHDEP = 0x3909B0,
+    .KERNEL_CODE_CAVE = 0xCAC6F0,
+    .FUN_PRINTF = 0x4ABB00,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC09D30,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC09C70,
+    .FUN_SMP_RENDEZVOUS = 0xAF92E0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0xAF90A0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847375,
+    .KERNEL_UART_OVERRIDE = 0x21E9378,
+    .KERNEL_CFI_CHECK = 0x44E550,
+    .G_VBIOS = 0x3DB39F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC01CD0,
+    .FUN_MP3_INITIALIZE = 0xA0BAC0,
+    .FUN_MP3_INVOKE = 0xA0A6C0,
+    .PS5_WIFI_FW_OFFSET = 0x15050D0,
+    .PS5_WIFI_FW_SIZE = 0x7A248,
+    .HV_MP_STARTUP_CALL = 0xC0A110,
+    .MP_STARTUP_INIT_VECTOR = 0x269238,
+    .DATA_CAVE = 0x2D29000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2520FE,
+    .GAD_POP_R8_RET = 0xB820BD,
+    .GAD_STORE_RCX_R8_RET = 0x472B09,
+    .GAD_STORE_RDI8_RCX_RET = 0x325D8F,
+    .GAD_OR_RCX_EAX_RET = 0x802E40,
+    .GAD_SET_DR7_RET = 0x9FF536,
+    .GAD_STORE_RCX_RDX_RET = 0x8247D5,
+    .GAD_STORE_RCX_RAX_RET = 0x2BB04F,
+    .GAD_MOV_RAX_RSI_RET = 0x8DB9F4,
+    .GAD_MOV_RAX_RDI_RET = 0xBE007A,
+    .GAD_REP_MOVSB_RET = 0x25CFE7,
+    .GAD_CLD_RET = 0x2883B0,
+    .GAD_RET_TRAMP = 0x291232,
+    .GAD_DBREG_RESUME = 0x252998,
+    .NVS_SIGNATURE = 0x1A06D40,
+    .HV_EFI_MAP_ROOT = 0x3DC9070,
+};
+
+offset_list off_1320 = {
+    .IOMMU_SOFTC = 0x3532CF0,
+    .VMSPACE_VM_VMID = 0x1EC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x2ED6570,
+    .ACPIGBL_FACS = 0x39B5390,
+    .IDT = 0x3B90300,
+    .COMMON_TSS = 0x3B92FE0,
+    .FUN_MEMCPY = 0x259070,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9DAF54,
+    .GAD_IRETQ = 0x257AFD,
+    .GAD_POP_RAX_RET = 0x291231,
+    .GAD_POP_RDI_RET = 0x3CBFAD,
+    .GAD_POP_RSI_RET = 0x632731,
+    .GAD_POP_RDX_RET = 0x2A0D3B,
+    .GAD_POP_RCX_RET = 0x291842,
+    .GAD_POP_RSP_RET = 0x291BD2,
+    .GAD_WRMSR_RET = 0x254FF4,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x3D34DA,
+    .KERNEL_CODE_CAVE = 0xCAC6F0,
+    .FUN_PRINTF = 0x25D4B0,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC09F30,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC09E70,
+    .FUN_SMP_RENDEZVOUS = 0xAF94E0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x2642A8,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847375,
+    .KERNEL_UART_OVERRIDE = 0x21E9378,
+    .KERNEL_CFI_CHECK = 0x44E5D0,
+    .G_VBIOS = 0x3DB39F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC01ED0,
+    .FUN_MP3_INITIALIZE = 0xA0BDD0,
+    .FUN_MP3_INVOKE = 0xA0A9D0,
+    .PS5_WIFI_FW_OFFSET = 0x1505170,
+    .PS5_WIFI_FW_SIZE = 0x7A248,
+    .HV_MP_STARTUP_CALL = 0xC0A310,
+    .MP_STARTUP_INIT_VECTOR = 0x26A798,
+    .DATA_CAVE = 0x2D29000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x2520FE,
+    .GAD_POP_R8_RET = 0xB822BD,
+    .GAD_STORE_RCX_R8_RET = 0x472B89,
+    .GAD_STORE_RDI8_RCX_RET = 0x325D8F,
+    .GAD_OR_RCX_EAX_RET = 0x803150,
+    .GAD_SET_DR7_RET = 0x9FF846,
+    .GAD_STORE_RCX_RDX_RET = 0x824AE5,
+    .GAD_STORE_RCX_RAX_RET = 0x2BB04F,
+    .GAD_MOV_RAX_RSI_RET = 0x8DBD04,
+    .GAD_MOV_RAX_RDI_RET = 0xBE027A,
+    .GAD_REP_MOVSB_RET = 0x25CFE7,
+    .GAD_CLD_RET = 0x304D17,
+    .GAD_RET_TRAMP = 0x291232,
+    .GAD_DBREG_RESUME = 0x252998,
+    .NVS_SIGNATURE = 0x1A06DF0,
+    .HV_EFI_MAP_ROOT = 0x3DC9070,
+};
+
+offset_list off_1340 = {
+    .IOMMU_SOFTC = 0x3532CF0,
+    .VMSPACE_VM_VMID = 0x1EC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x3B8A570,
+    .ACPIGBL_FACS = 0x39B9390,
+    .IDT = 0x3B94300,
+    .COMMON_TSS = 0x3B96FE0,
+    .FUN_MEMCPY = 0x2590B0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9DB264,
+    .GAD_IRETQ = 0x257B3D,
+    .GAD_POP_RAX_RET = 0x291291,
+    .GAD_POP_RDI_RET = 0x33CC8D,
+    .GAD_POP_RDX_RET = 0x2A0D9B,
+    .GAD_POP_RCX_RET = 0x2918A2,
+    .GAD_POP_RSP_RET = 0x291C32,
+    .GAD_WRMSR_RET = 0x255034,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x3D353A,
+    .KERNEL_CODE_CAVE = 0xCACA00,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC0A240,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC0A180,
+    .FUN_SMP_RENDEZVOUS = 0xAF97F0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847375,
+    .KERNEL_UART_OVERRIDE = 0x21E9578,
+    .KERNEL_CFI_CHECK = 0x44E630,
+    .G_VBIOS = 0x3DB79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC021E0,
+    .FUN_MP3_INITIALIZE = 0xA0C0E0,
+    .FUN_MP3_INVOKE = 0xA0ACE0,
+    .PS5_WIFI_FW_OFFSET = 0x1505410,
+    .PS5_WIFI_FW_SIZE = 0x7A248,
+    .HV_MP_STARTUP_CALL = 0xC0A620,
+    .DATA_CAVE = 0x2D29000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x25213E,
+    .GAD_POP_R8_RET = 0xB825CD,
+    .GAD_STORE_RCX_R8_RET = 0x472BE9,
+    .GAD_STORE_RDI8_RCX_RET = 0x325DEF,
+    .GAD_OR_RCX_EAX_RET = 0x803460,
+    .GAD_SET_DR7_RET = 0x9FFB56,
+    .GAD_STORE_RCX_RDX_RET = 0x824DF5,
+    .GAD_STORE_RCX_RAX_RET = 0x2BB0AF,
+    .GAD_MOV_RAX_RSI_RET = 0x8DC014,
+    .GAD_MOV_RAX_RDI_RET = 0xBE058A,
+    .GAD_REP_MOVSB_RET = 0x25D027,
+    .GAD_CLD_RET = 0x362F60,
+    .GAD_RET_TRAMP = 0x291292,
+    .GAD_DBREG_RESUME = 0x2529D8,
+    .NVS_SIGNATURE = 0x1A071A0,
+    .HV_EFI_MAP_ROOT = 0x3DCD070,
+    .GAD_POP_RSI_RET = 0x35D93E,
+    .FUN_PRINTF = 0x25D3F0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x261F38,
+    .MP_STARTUP_INIT_VECTOR = 0x268D08,
+};
+
+offset_list off_1342 = {
+    .IOMMU_SOFTC = 0x3532CF0,
+    .VMSPACE_VM_VMID = 0x1EC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x3B8A570,
+    .ACPIGBL_FACS = 0x39B9390,
+    .IDT = 0x3B94300,
+    .COMMON_TSS = 0x3B96FE0,
+    .FUN_MEMCPY = 0x2590B0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9DB264,
+    .GAD_IRETQ = 0x257B3D,
+    .GAD_POP_RAX_RET = 0x291291,
+    .GAD_POP_RDI_RET = 0x33CC8D,
+    .GAD_POP_RDX_RET = 0x2A0D9B,
+    .GAD_POP_RCX_RET = 0x2918A2,
+    .GAD_POP_RSP_RET = 0x291C32,
+    .GAD_WRMSR_RET = 0x255034,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x3D353A,
+    .KERNEL_CODE_CAVE = 0xCACA00,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC0A240,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC0A180,
+    .FUN_SMP_RENDEZVOUS = 0xAF97F0,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847375,
+    .KERNEL_UART_OVERRIDE = 0x21E9578,
+    .KERNEL_CFI_CHECK = 0x44E630,
+    .G_VBIOS = 0x3DB79F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC021E0,
+    .FUN_MP3_INITIALIZE = 0xA0C0E0,
+    .FUN_MP3_INVOKE = 0xA0ACE0,
+    .PS5_WIFI_FW_OFFSET = 0x1505410,
+    .PS5_WIFI_FW_SIZE = 0x7A248,
+    .HV_MP_STARTUP_CALL = 0xC0A620,
+    .DATA_CAVE = 0x2D29000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x25213E,
+    .GAD_POP_R8_RET = 0xB825CD,
+    .GAD_STORE_RCX_R8_RET = 0x472BE9,
+    .GAD_STORE_RDI8_RCX_RET = 0x325DEF,
+    .GAD_OR_RCX_EAX_RET = 0x803460,
+    .GAD_SET_DR7_RET = 0x9FFB56,
+    .GAD_STORE_RCX_RDX_RET = 0x824DF5,
+    .GAD_STORE_RCX_RAX_RET = 0x2BB0AF,
+    .GAD_MOV_RAX_RSI_RET = 0x8DC014,
+    .GAD_MOV_RAX_RDI_RET = 0xBE058A,
+    .GAD_REP_MOVSB_RET = 0x25D027,
+    .GAD_CLD_RET = 0x362F60,
+    .GAD_RET_TRAMP = 0x291292,
+    .GAD_DBREG_RESUME = 0x2529D8,
+    .NVS_SIGNATURE = 0x1A071A0,
+    .HV_EFI_MAP_ROOT = 0x3DCD070,
+    .GAD_POP_RSI_RET = 0x2A19BE,
+    .FUN_PRINTF = 0x25D360,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x263AC8,
+    .MP_STARTUP_INIT_VECTOR = 0x2687D8,
+};
+
+offset_list off_1360 = {
+    .IOMMU_SOFTC = 0x3543A70,
+    .VMSPACE_VM_VMID = 0x1EC,
+    .VMSPACE_VM_PMAP = 0x1D8,
+    .DATA_BASE_GVMSPACE = 0x3BAA570,
+    .ACPIGBL_FACS = 0x39C9490,
+    .IDT = 0x3BB4300,
+    .COMMON_TSS = 0x3BB6FE0,
+    .FUN_MEMCPY = 0x2590B0,
+    .GAD_ADD_RSP_28_POP_RBP_RET = 0x9E32B4,
+    .GAD_IRETQ = 0x257B3D,
+    .GAD_POP_RAX_RET = 0xB8CA6E,
+    .GAD_POP_RDI_RET = 0x28CE6D,
+    .GAD_POP_RSI_RET = 0x34CB91,
+    .GAD_POP_RDX_RET = 0x2A0F7B,
+    .GAD_POP_RCX_RET = 0x2918B2,
+    .GAD_POP_RSP_RET = 0xB8291B,
+    .GAD_WRMSR_RET = 0x255034,
+    .GAD_MOV_QWORD_PTR_RDI_RSI_POP_RBP_RET = 0x3D3F2A,
+    .KERNEL_CODE_CAVE = 0xCB92C0,
+    .FUN_PRINTF = 0x25D410,
+    .FUN_HV_IOMMU_SET_BUFFERS = 0xC16B00,
+    .FUN_HV_IOMM_WAIT_COMPLETION = 0xC16A40,
+    .FUN_SMP_RENDEZVOUS = 0xB03BA0,
+    .FUN_SMP_NO_RENDEVOUS_BARRIER = 0x261E08,
+    .HV_CODE_CAVE_PA = 0x62806F00,
+    .HV_HANDLE_VMEXIT_PA = 0x62847375,
+    .KERNEL_UART_OVERRIDE = 0x21F9598,
+    .KERNEL_CFI_CHECK = 0x44F8C0,
+    .G_VBIOS = 0x3DDB9F0,
+    .FUN_TRANSMITTER_CONTROL = 0xC0EAA0,
+    .FUN_MP3_INITIALIZE = 0xA14130,
+    .FUN_MP3_INVOKE = 0xA12D30,
+    .PS5_WIFI_FW_OFFSET = 0x1518160,
+    .PS5_WIFI_FW_SIZE = 0x7A248,
+    .HV_MP_STARTUP_CALL = 0xC16EE0,
+    .MP_STARTUP_INIT_VECTOR = 0x269FB8,
+    .DATA_CAVE = 0x2D39000,
+    .GAD_PIVOT_ADD_RSP28_RET = 0x25213E,
+    .GAD_POP_R8_RET = 0xB8CA6D,
+    .GAD_STORE_RCX_R8_RET = 0x474389,
+    .GAD_STORE_RDI8_RCX_RET = 0x32693F,
+    .GAD_OR_RCX_EAX_RET = 0x321EA0,
+    .GAD_SET_DR7_RET = 0xA07BA6,
+    .GAD_STORE_RCX_RDX_RET = 0x82B915,
+    .GAD_STORE_RCX_RAX_RET = 0x2BB28F,
+    .GAD_MOV_RAX_RSI_RET = 0x8E3A44,
+    .GAD_MOV_RAX_RDI_RET = 0xBECDEA,
+    .GAD_REP_MOVSB_RET = 0x25D027,
+    .GAD_CLD_RET = 0x30644F,
+    .GAD_RET_TRAMP = 0x2912A2,
+    .GAD_DBREG_RESUME = 0x2529D8,
+    .NVS_SIGNATURE = 0x1A1A030,
+    .HV_EFI_MAP_ROOT = 0x3DF1070,
+};

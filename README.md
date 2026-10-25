@@ -1,7 +1,6 @@
 # ps5-linux
 
-
-**ps5-linux** leverages patched HV vulnerabilities to transform your **PS5 Phat, Slim and Pro** console running **3.00-7.61 or 13.60 firmwares** into a highly capable Linux PC, unlocking its full hardware potential for desktop use. Powered by 8 CPU cores (16 threads) at **3.5 GHz** and a GPU at **2.23 GHz**, it provides enough performance to run Steam games and various emulators with impressive fluidity.
+**ps5-linux** leverages patched HV vulnerabilities to transform your **PS5 Phat, Slim and Pro** console running **3.00-13.60 firmwares** into a highly capable Linux PC, unlocking its full hardware potential for desktop use. Powered by 8 CPU cores (16 threads) at **3.5 GHz** and a GPU at **2.23 GHz**, it provides enough performance to run Steam games and various emulators with impressive fluidity.
 
 Features:
 
@@ -11,21 +10,25 @@ Features:
 - BD drive usable via custom ahci driver
 - Internal Bluetooth usable via custom xhci driver
 - Ethernet port usable via custom gbe driver
+- Hardware video decode, encode and transcode (VCN) via VAAPI
 
 ![Alt Text](logo.webp)
 
 ## PS5 firmware
 
-*ps5-linux* is supported on PS5 Phat and Slim on the following firmwares, and on PS5 Phat, Slim and **Pro** on 13.60:
+*ps5-linux* is supported on the following firmwares:
 
+**PS5 Phat and Slim:**
 - **3.00**, **3.10**, **3.20**, **3.21** without M.2 support
 - **4.00**, **4.02**, **4.03**, **4.50**, **4.51** with M.2 support
 - **5.00**, **5.02**, **5.10**, **5.50** with M.2 support
 - **6.00**, **6.02**, **6.50** with M.2 support
-- **10.xx
-- **11.xx
 - **7.00**, **7.01**, **7.20**, **7.40**, **7.60**, **7.61** with M.2 support
-- **13.XX** with M.2 support — **PS5 Phat, Slim and Pro** (this fork)
+- **11.60** (regular PS5 only, M.2 not tested yet; the kernel needs KASLR, so do not pass `nokaslr`, `mem=` or `memmap=`)
+- **13.00**, **13.20**, **13.60** with M.2 support
+
+**PS5 Pro:**
+- **13.60** with M.2 support
 
 Support for 1.xx and 2.xx firmwares may be added in the future, but we will not prioritize this effort.
 
@@ -47,7 +50,7 @@ To run *ps5-linux*, you need some required and optional hardwares:
 - **VERY IMPORTANT**: Enable Rest Mode features:
   - Go to `Settings` → `System` → `Power Saving` → `Features Available in Rest Mode` and set `Supply Power to USB Ports` to `Always`.
 - **VERY IMPORTANT**: Disable HDMI Device Link:
-  - Go to `Settings` → `HDMI` → `Disable HDMI Device Link`
+  - Go to `Settings` → `HDMI` → `Enable HDMI Device Link`
 - *Recommended*: Disable automatic updates:
   - Go to `Settings` → `System Software` → `System Software Update and Settings`
 - *Recommended*: Disable automatic error reporting:
@@ -161,7 +164,7 @@ If the LED is white, but you still have a blackscreen then:
 - Try different monitors or capture cards, ideally with different resolutions. Currently, some monitors have issues.
 - Try setting `amdgpu.force_1080p=1` in `cmdline.txt` in the FAT32 partition of the USB drive.
 
-If none of this helps, please report the issue in our [Discord server](https://discord.gg/U5huNwxz6r) and provide your EDID information.
+If none of this helps, please report the issue in our [Discord server](https://discord.gg/PeMGVB7BAm) and provide your EDID information.
 
 
 ## First Boot
@@ -224,7 +227,7 @@ cd ps5-linux-tools
 sudo ./m2_init
 ```
 
-4. Reboot via `sudo reboot`. If your PS5 asks you to format your M.2 again, please report this issue to us in our [Discord server](https://discord.gg/U5huNwxz6r) and provide your M.2 model and storage size.
+4. Reboot via `sudo reboot`. If your PS5 asks you to format your M.2 again, please report this issue to us in our [Discord server](https://discord.gg/PeMGVB7BAm) and provide your M.2 model and storage size.
 5. Relaunch Linux on your PS5.
 6. Copy the `ps5-ubuntu2604.img` image that you built during installation or rebuild it on your PS5. Then, install it onto your M.2:
 
@@ -264,8 +267,8 @@ For any future ps5-linux updates, you can download the `.deb` or `.pkg.tar.zst` 
 
 ## FAQ
 
-- Q: Will higher >=8.00 firmwares be supported?
-  - A: **13.60** is supported (base and PS5 Pro) in this fork. 8.00-13.50 are not supported; if you are on 12.00-13.60 you can update to 13.60.
+- Q: Will higher >=14.00 firmwares be supported?
+  - A: No.
 - Q: Why can I not use M.2 on 3.xx?
   - A: Because the PS5 fails to boot with it attached.
 - Q: Can I dual-boot Linux and PS5 OS?
@@ -275,7 +278,9 @@ For any future ps5-linux updates, you can download the `.deb` or `.pkg.tar.zst` 
 - Q: Can I continue using my PS5 if I install Linux?
   - A: Yes, the internal SSD is not modified
 - Q: Can I use the PS5's NIC/WLAN module in Linux?
-  - A: WLAN is only supported for Marvell chipsets at the moment. Ethernet is supported on all models.
+  - A: WLAN is supported for Marvell chipsets (Phat/Slim) and the MediaTek MT7925 (Pro) — both work out of the box with the included firmware. Ethernet is supported on all models.
+- Q: Does hardware video decode and transcode work?
+  - A: Yes, since [ps5-linux-patches #38](https://github.com/ps5-linux/ps5-linux-patches/pull/38). Decode works for H.264, HEVC Main/Main 10, VP9 Profile 0/2, VC-1 and MPEG-2. Encode works for H.264, and for HEVC with I-frames only.
 - Q: Does the DualSense controller work?
   - A: Yes, via internal Bluetooth as well as Bluetooth dongle.
 - Q: What resolutions and refresh rates are supported?
@@ -300,6 +305,7 @@ Many configurations, tips and tricks from the [AMD BC250 Documentation](https://
 - screen save does not work properly
 - hdmi audio output does not work on some monitors
 - hdmi 1440p and 2160p video output does not work on some monitors
+- VCN HEVC encode has corrupt chroma with P-frames, use I-frame only (`-g 1 -bf 0`) or H.264
 
 ## Upstreamed changes
 
@@ -310,7 +316,7 @@ During this project, we have upstreamed some changes:
 
 ## Discord
 
-Join our [Discord server](https://discord.gg/U5huNwxz6r) to celebrate Linux on PS5, receive help, learn tips & tricks, join development, or report issues.
+Join our [Discord server](https://discord.gg/PeMGVB7BAm) to celebrate Linux on PS5, receive help, learn tips & tricks, join development, or report issues.
 
 ## Credits
 
@@ -325,4 +331,5 @@ Join our [Discord server](https://discord.gg/U5huNwxz6r) to celebrate Linux on P
 - [echostretch](https://github.com/echostretch): Offsets and testing
 - [kirathenotebook](https://github.com/kirathenotebook): Betatesting and readme contribution
 - 15432: Tests on BC-250
-- [Sonic-Iso](https://github.com/soniciso1): High firmware support contributor (13.60 support, including PS5 Pro)
+- [DeathlySin](https://github.com/DeathlySin): PS5 Pro support (E820 memory map, I/O fix)
+- [gzimbric](https://github.com/gzimbric): 11.60 support, building on the 13.xx work of Ouroboros, DeathlySin and Sonic, with a startup-AP payload based on SpecterDev's Byepervisor

@@ -63,9 +63,6 @@ static void e820_memory_setup(struct boot_params *bp) {
   } else {
     append_e820_table(bp, 0x001000000, 0x040000000, E820_TYPE_RESERVED);
   }
-  /* PS5 Pro has no MP4 hardware block reserved here -- it's plain RAM straight through to
-   * 0x060800000. Cross-checked against github.com/ps5-linux/ps5-linux-loader PR #47,
-   * 2026-10-18. */
   if (info.kit_type == KIT_RETAIL_PRO) {
     append_e820_table(bp, 0x040000000, 0x060800000, E820_TYPE_RAM);
   } else {
@@ -73,8 +70,6 @@ static void e820_memory_setup(struct boot_params *bp) {
     append_e820_table(bp, 0x060000000, 0x060800000, E820_TYPE_RESERVED); // MP4
   }
   append_e820_table(bp, 0x060800000, 0x060c00000, E820_TYPE_RESERVED); // VCN FW
-  /* PS5 Pro's HV carveout isn't here at all (it's near 38GB, see below) -- the low ~1.6GB
-   * region that holds devkit/base's HV instead stays plain RAM on Pro. */
   if (info.kit_type == KIT_RETAIL_PRO) {
     append_e820_table(bp, 0x060c00000, 0x064000000, E820_TYPE_RAM);
     append_e820_table(bp, 0x064000000, 0x064829000, E820_TYPE_RESERVED); // MP3
@@ -97,16 +92,6 @@ static void e820_memory_setup(struct boot_params *bp) {
   append_e820_table(bp, 0x100000000, VRAM_BASE, E820_TYPE_RAM);
   append_e820_table(bp, VRAM_BASE, 0x470000000, E820_TYPE_RESERVED); // VRAM
 
-  /* PS5 Pro's real physical memory layout above 4GB: RAM to 0x47f300000, then a long reserved
-   * gap, then more RAM, then the REAL HV carveout at 0x8e0000000-0x8e2000000 (matches
-   * derive_hv_base()'s live measurement this session, 0x8e0000000 size 0x2000000), then RAM
-   * again. Cross-checked against github.com/ps5-linux/ps5-linux-loader PR #47, 2026-10-18. */
-  /* Retail PS5 Pro has 16 GB of DRAM. RAM ends at 0x47f300000 (~18 GB physical,
-   * ~16 GB usable); the HV carveout at 0x8e0000000 (38 GB) is a reserved high
-   * aperture, not DRAM. Do NOT expose 0x880000000-0x900000000 as RAM: 32 GB is
-   * devkit-only, and on a 16 GB retail Pro those windows are nonexistent.
-   * Marking them RAM lets Linux allocate pages/DMA there; the xHCI then DMAs
-   * into absent physical memory and hangs ("HC died"). */
   if (info.kit_type == KIT_RETAIL_PRO) {
     append_e820_table(bp, 0x470000000, 0x47f300000, E820_TYPE_RAM);
     append_e820_table(bp, 0x47f300000, 0x8e0000000, E820_TYPE_RESERVED);
@@ -121,14 +106,6 @@ static void e820_memory_setup(struct boot_params *bp) {
     append_e820_table(bp, 0x470000000, 0x87f300000, E820_TYPE_RAM);
     append_e820_table(bp, 0x87f300000, 0x880000000, E820_TYPE_RESERVED);
   }
-
-  /* 13.60 addition. The table above is the 7.61 map, and the UEFI memory map captured from
-   * this console (payload/logs/aprecon4_full.txt, 25 descriptors) converts into it ENTRY FOR
-   * ENTRY -- which is what validates the decode. Exactly one range is missing, this one.
-   * NOTE: memmap_scan.log is NOT a source for this -- it is a kernel-internal
-   * "S4 preserved memory" list (~2.2 GiB, no 4 GiB+ window), not the platform map.
-   * See HVXring0/findings/HV-SIDE-13.60-DERIVED.md for the full list and provenance. */
-  append_e820_table(bp, 0x980000000, 0xa00000000, E820_TYPE_RESERVED); // MMIO
 
   for (int i = 0; i < info.n_tmrs; i++) {
     append_e820_table(bp, info.tmrs[i].start, info.tmrs[i].end, E820_TYPE_RESERVED);
@@ -159,8 +136,8 @@ void boot_linux(void) {
   bp->ext_ramdisk_image = info.initrd >> 32;
   bp->ext_ramdisk_size = info.initrd_size >> 32;
   bp->acpi_rsdp_addr = info.kit_type == KIT_RETAIL_PRO
-                            ? ACPI_RSDP_ADDRESS_PRO
-                            : ACPI_RSDP_ADDRESS;
+                             ? ACPI_RSDP_ADDRESS_PRO
+                             : ACPI_RSDP_ADDRESS;
 
   strcpy((char *)cmdline_pa, info.cmdline);
 
@@ -176,12 +153,6 @@ void boot_linux(void) {
 
 void entry(void) {
   disable_intr();
-
-  // Open the Titania UART gate before anything tries to print. In this context the
-  // shellcode runs on a 1:1 mapping, so the gate is addressed PHYSICALLY and the bit
-  // is NEGATED -- the opposite of the GameOS path, which SETs it via dmap_base.
-  // Must happen on every resume, so sleep/wake under Linux keeps serial output.
-  activate_uart_hv();
 
   // Set global interrupt flag.
   __asm__ volatile("stgi\n");

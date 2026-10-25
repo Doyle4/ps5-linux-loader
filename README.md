@@ -14,22 +14,6 @@ Features:
 
 ![Alt Text](logo.webp)
 
-## 13.60 and PS5 Pro support (high-firmware fork)
-
-This fork adds **firmware 13.60** support, including the **PS5 Pro**, on top of the upstream
-project. Linux boots to a desktop through the same rest-mode / S3-resume mechanism; PS5 Pro is
-detected automatically at runtime (no separate build).
-
-> **Porting to other firmwares:** bringing this route to a new firmware **requires a UART/serial
-> cable** (3.3 V TTL on the Titania test pins, 230400 8N1) for debugging. The resume-time stages
-> emit their progress markers over serial, and a failed resume typically dies with no network and
-> no screen output — without UART a bring-up attempt is effectively blind.
-
-> **Firmware update advice — read before updating:**
-> - **If you are on 11.60 or lower, do NOT update.** You will lose fPKG support.
-> - **If you are on 12.00–13.60, updating does not matter** — you may update to 13.60 freely, since
->   the upcoming fPKG support covers 12.00–13.60 anyway.
-
 ## PS5 firmware
 
 *ps5-linux* is supported on PS5 Phat and Slim on the following firmwares, and on PS5 Phat, Slim and **Pro** on 13.60:
@@ -38,8 +22,10 @@ detected automatically at runtime (no separate build).
 - **4.00**, **4.02**, **4.03**, **4.50**, **4.51** with M.2 support
 - **5.00**, **5.02**, **5.10**, **5.50** with M.2 support
 - **6.00**, **6.02**, **6.50** with M.2 support
+- **10.xx
+- **11.xx
 - **7.00**, **7.01**, **7.20**, **7.40**, **7.60**, **7.61** with M.2 support
-- **13.60** with M.2 support — **PS5 Phat, Slim and Pro** (this fork)
+- **13.XX** with M.2 support — **PS5 Phat, Slim and Pro** (this fork)
 
 Support for 1.xx and 2.xx firmwares may be added in the future, but we will not prioritize this effort.
 

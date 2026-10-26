@@ -24,8 +24,9 @@ Features:
 - **5.00**, **5.02**, **5.10**, **5.50** with M.2 support
 - **6.00**, **6.02**, **6.50** with M.2 support
 - **7.00**, **7.01**, **7.20**, **7.40**, **7.60**, **7.61** with M.2 support
-- **11.60** (regular PS5 only, M.2 not tested yet; the kernel needs KASLR, so do not pass `nokaslr`, `mem=` or `memmap=`)
-- **13.00**, **13.20**, **13.60** with M.2 support
+- **10.00**, **10.01**, **10.20**, **10.40**, **10.60** with M.2 support
+- **11.00**, **11.20**, **11.40**, **11.60** (the kernel needs KASLR, so do not pass `nokaslr`, `mem=` or `memmap=`)
+- **13.00**, **13.20**, **13.40**, **13.42**, **13.60** with M.2 support
 
 **PS5 Pro:**
 - **13.60** with M.2 support

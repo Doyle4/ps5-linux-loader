@@ -48,6 +48,8 @@ extern struct linux_info linux_i; // Declared on main.c
 
 int setup_env(void);
 
+void set_idt_gate(int idx, uintptr_t func, int typ, int dpl, int ist);
+
 static inline void kwrite_large(uint64_t ka, void *src, uint64_t len) {
   uint32_t CHUNK = 0x1000;
   uint64_t written = 0;

@@ -1,6 +1,7 @@
 #include "utils.h"
 #include "linux.h"
 #include "offsets.h"
+#include <machine/segments.h>
 #include <stdio.h>
 #include <sys/cpuset.h>
 #include <sys/mman.h>
@@ -15,6 +16,20 @@ uint64_t dmap;
 uint64_t cr3;
 uint32_t fw;
 struct linux_info linux_i;
+
+void set_idt_gate(int idx, uintptr_t func, int typ, int dpl, int ist) {
+  struct gate_descriptor ip = {};
+  ip.gd_looffset = func;
+  ip.gd_selector = GSEL(GCODE_SEL, SEL_KPL);
+  ip.gd_ist = ist;
+  ip.gd_xx = 0;
+  ip.gd_type = typ;
+  ip.gd_dpl = dpl;
+  ip.gd_p = 1;
+  ip.gd_hioffset = func >> 16;
+  kwrite(ktext + env_offset.IDT + idx * sizeof(struct gate_descriptor), &ip,
+         sizeof(ip));
+}
 
 int setup_env(void) {
   notify("Welcome to ps5-linux-loader. We'll defeat HV and prepare the system "

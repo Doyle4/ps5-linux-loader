@@ -30,14 +30,17 @@ static const char *get_overridden_filename(const char *filename) {
     ssize_t size = find_and_get_size_of_file("path-override.txt", found_path);
     if (size > 0) {
       overrides_start = malloc(size + 1);
+      if (overrides_start == nullptr)
+        return filename;
       overrides_end = overrides_start + size + 1;
       if (read_file(found_path, overrides_start, size) == size) {
         state = 2;
-        for (char *p = overrides_start; p < overrides_end; p++)
-          if (*p == '\n')
-            *p = 0;
         // make sure the last string is null-terminated
         overrides_start[size] = 0;
+        // accept both LF and CRLF line endings
+        for (char *p = overrides_start; p < overrides_end; p++)
+          if (*p == '\n' || *p == '\r')
+            *p = 0;
       }
     }
   }
@@ -105,6 +108,41 @@ int read_file(const char *path, void *buf, size_t bufsize) {
   int r = read(fd, buf, bufsize);
   close(fd);
   return r;
+}
+
+/* Some USB bridges/FAT paths report st_size == 0 for a valid file. The old code
+ * then asked mmap() for 0 bytes and got EINVAL ("could not allocate bzimage
+ * (0 bytes, errno 22)"). Read until EOF into a caller-sized cap and let the
+ * read() return value supply the real length. */
+static int read_file_until_eof(const char *path, void *buf, size_t max) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return fd;
+  size_t total = 0;
+  while (total < max) {
+    ssize_t n = read(fd, (char *)buf + total, max - total);
+    if (n < 0) {
+      int e = errno;
+      close(fd);
+      errno = e;
+      return -1;
+    }
+    if (n == 0)
+      break;
+    total += (size_t)n;
+  }
+  /* Filled the whole buffer: make sure the file really ended there instead of
+   * silently returning a truncated kernel/initrd. */
+  if (total == max) {
+    char extra;
+    if (read(fd, &extra, 1) != 0) {
+      close(fd);
+      errno = EFBIG;
+      return -1;
+    }
+  }
+  close(fd);
+  return (int)total;
 }
 
 void trim_newline(char *s) {

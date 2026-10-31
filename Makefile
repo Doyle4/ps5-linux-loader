@@ -7,52 +7,68 @@ endif
 include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 
 BIN := bin/ps5-linux-loader.elf
-# Probe payloads live in source/ for historical reasons, but each has its own main() and is
-# built INDIVIDUALLY with the SDK wrapper. Linking them into the loader fails with duplicate
-# symbol: main. Exclude them here rather than moving the files (the build artifacts and the
-# handoff notes reference these paths).
-PROBE_SRC := source/efimeta_probe.c source/oracle_probe.c source/physmem_probe.c \
-             source/propro_probe.c source/propro_probe2.c source/viola_probe.c \
-             source/wakepa_probe.c source/wakepa_probe_1160.c source/wakepa_probe_1360.c
-SRC := $(filter-out $(PROBE_SRC),$(wildcard source/*.c))
+SRC := $(wildcard source/*.c)
 OBJS := $(SRC:.c=.o)
 
-# EXTRA_CFLAGS reaches the shellcode sub-makes through their own Makefiles, but used to stop
-# there: a -D passed on the command line silently had no effect on source/*.c, and the build
-# came out byte-identical to one without it. Appended here so loader-side flags work too
-# (e.g. -DPS5_VBIOS_OVERRIDE).
-CFLAGS  := -std=c23 -Wall -Iinclude -Ishellcode_hv -Ishellcode_kernel $(EXTRA_CFLAGS)
+CFLAGS  := -std=c23 -Wall -Iinclude -Ishellcode_hv -Ishellcode_kernel
 LDFLAGS :=
 
+SC_0607_H := shellcode_0607/shellcode_0607.h
 SC_HV_H := shellcode_hv/shellcode_hv.h
 SC_K_H  := shellcode_kernel/shellcode_kernel.h
-SC_AP_H := shellcode_ap/shellcode_ap.h
+SC_K_13XX_H := shellcode_kernel_13xx/shellcode_kernel_13xx.h
+SC_K_1160_H := shellcode_kernel_1160/shellcode_kernel_1160.h
+SC_K_89_H := shellcode_kernel_89/shellcode_kernel_89.h
+SC_BREAK_HV_H := shellcode_break_hv/break_hv.h
 
-# These used to have NO prerequisites, so once the .h existed `make` considered it up to date and
-# silently linked the OLD blob after a shellcode edit. The byte-blob is regenerated only when a
-# shellcode source changes, which is exactly what the prerequisites below now express.
-SC_HV_SRC   := $(wildcard shellcode_hv/*.c shellcode_hv/*.S shellcode_hv/*.h shellcode_hv/*.ld)
-SC_K_SRC    := $(wildcard shellcode_kernel/*.c shellcode_kernel/*.S shellcode_kernel/*.h shellcode_kernel/*.ld)
-SC_AP_SRC   := $(wildcard shellcode_ap/*.c shellcode_ap/*.S shellcode_ap/*.h shellcode_ap/*.ld)
+all: $(SC_0607_H) $(SC_HV_H) $(SC_K_H) $(SC_K_13XX_H) $(SC_K_1160_H) \
+	$(SC_K_89_H) $(SC_BREAK_HV_H) $(BIN)
 
-all: $(SC_HV_H) $(SC_K_H) $(SC_AP_H) $(BIN)
+$(SC_0607_H):
+	$(MAKE) -C shellcode_0607
 
-$(SC_HV_H): $(SC_HV_SRC)
+$(SC_HV_H):
 	$(MAKE) -C shellcode_hv
 
-$(SC_K_H): $(SC_K_SRC)
+$(SC_K_H): $(SC_HV_H)
 	$(MAKE) -C shellcode_kernel
 
-# The 13.x AP payload, built with the host toolchain (freestanding, linked at 0) rather than
-# the SDK, because it is a position-independent blob copied to a physical page at runtime.
-$(SC_AP_H):
-	$(MAKE) -C shellcode_ap
+$(SC_K_13XX_H): $(SC_HV_H) shellcode_kernel/main.c \
+		shellcode_kernel/boot_linux.c shellcode_kernel/utils.c \
+		shellcode_kernel/main.h shellcode_kernel/boot_linux.h \
+		shellcode_kernel/utils.h shellcode_kernel/shellcode_kernel_args.h \
+		shellcode_kernel/linker.ld include/config.h include/linux.h \
+		shellcode_kernel_13xx/Makefile
+	$(MAKE) -C shellcode_kernel_13xx
 
-# The loader's own objects embed the shellcode blobs through the generated .h files, but had no
-# header prerequisites -- so regenerating a blob (e.g. for an op-mask bisect build) would NOT
-# recompile them and `make` would relink the OLD blob. That silently makes every bisect probe lie.
-$(OBJS): %.o: %.c $(wildcard include/*.h) $(SC_HV_H) $(SC_K_H) $(SC_AP_H)
+$(SC_K_1160_H): $(SC_HV_H) shellcode_kernel/main.c \
+		shellcode_kernel/boot_linux.c shellcode_kernel/utils.c \
+		shellcode_kernel/main.h shellcode_kernel/boot_linux.h \
+		shellcode_kernel/utils.h shellcode_kernel/shellcode_kernel_args.h \
+		shellcode_kernel/linker.ld include/config.h include/linux.h \
+		shellcode_kernel_1160/Makefile shellcode_kernel_1160/display_ops_1160.c \
+		shellcode_kernel_1160/display_ops_1160.h \
+		shellcode_kernel_1160/shellcode_kernel_args_validate.h
+	$(MAKE) -C shellcode_kernel_1160
+
+$(SC_K_89_H): $(SC_HV_H) $(SC_K_1160_H) shellcode_kernel/main.c \
+		shellcode_kernel/boot_linux.c shellcode_kernel/utils.c \
+		shellcode_kernel/main.h shellcode_kernel/boot_linux.h \
+		shellcode_kernel/utils.h shellcode_kernel/shellcode_kernel_args.h \
+		shellcode_kernel/linker.ld include/config.h include/linux.h \
+		shellcode_kernel_89/Makefile shellcode_kernel_1160/display_ops_1160.c
+	$(MAKE) -C shellcode_kernel_89
+
+$(SC_BREAK_HV_H): shellcode_break_hv/break_hv.c \
+		shellcode_break_hv/break_hv_params.h shellcode_break_hv/entry.S \
+		shellcode_break_hv/link.ld shellcode_break_hv/Makefile
+	$(MAKE) -C shellcode_break_hv
+
+$(OBJS): %.o: %.c include/config.h include/offsets.h include/utils.h
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+source/prepare_resume.o: $(SC_K_13XX_H) $(SC_K_1160_H) $(SC_K_89_H)
+source/hv_defeat_1160.o: $(SC_BREAK_HV_H)
 
 $(BIN): $(OBJS)
 	@mkdir -p $(dir $@)
@@ -60,6 +76,10 @@ $(BIN): $(OBJS)
 
 clean:
 	rm -f $(BIN) $(OBJS)
+	$(MAKE) -C shellcode_0607 clean
 	$(MAKE) -C shellcode_hv clean
 	$(MAKE) -C shellcode_kernel clean
-	$(MAKE) -C shellcode_ap clean
+	$(MAKE) -C shellcode_kernel_13xx clean
+	$(MAKE) -C shellcode_kernel_1160 clean
+	$(MAKE) -C shellcode_kernel_89 clean
+	$(MAKE) -C shellcode_break_hv clean

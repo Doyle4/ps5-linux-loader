@@ -2,8 +2,8 @@
 #include "config.h"
 #include "firmware.h"
 #include "linux.h"
+#include "loader_staging_1160.h"
 #include "utils.h"
-#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +73,8 @@ long find_and_get_size_of_file(const char *filename, char *found_path) {
     snprintf(full_path, sizeof(full_path), "%s%s", file_paths[i], filename);
 
     if (stat(full_path, &st) == 0) {
-      notify("File '%s' found in '%s'\n", filename, file_paths[i]);
+      notify("File '%s' found in '%s'\n", filename,
+             file_paths[i]);
       strcpy(found_path, full_path);
       return st.st_size;
     }
@@ -158,71 +159,47 @@ int fetch_linux(struct linux_info *info) {
   char bzimage_path[256];
   char initrd_path[256];
 
-  long bzimage_stat = find_and_get_size_of_file("bzImage", bzimage_path);
-  if (bzimage_stat < 0) {
+  ssize_t bzimage_size = find_and_get_size_of_file("bzImage", bzimage_path);
+  if (bzimage_size < 0) {
     notify("File bzImage not found at default paths - Aborting\n");
     return -1;
   }
 
-  /* A valid file can still report st_size == 0 through some USB bridges/FAT
-   * paths; fall back to read-until-EOF and take the real length from read(). */
-  size_t bzimage_map = bzimage_stat ? ALIGN_UP((size_t)bzimage_stat, PAGE_SIZE)
-                                    : (64u << 20);
-  void *bzimage = mmap(NULL, bzimage_map, PROT_READ | PROT_WRITE,
-                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  void *bzimage =
+      mmap(NULL, ALIGN_UP(bzimage_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
+           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (bzimage == MAP_FAILED) {
-    /* REPORT WHY (added 2026-10-13 after a 12,705,792-byte request came back MAP_FAILED on a
-     * console whose card was provably fine). A ~12 MiB anonymous mmap does not fail for lack of
-     * memory on a healthy PS5 OS, so errno is the entire diagnosis:
-     *   ENOMEM(12) -> the console's VM really is exhausted. That is what a console that was NOT
-     *                 cold-booted looks like -- CONTEXT §9e requires a reboot before this loader,
-     *                 because the previous session leaves kernel .text RW/XOTEXT-cleared and the
-     *                 16 VMCBs cleared, and this loader then arms on top of that.
-     *   EINVAL(22) -> the request is malformed, i.e. a bogus size came back from the FAT.
-     *   anything else -> the mapping cannot be backed at all.
-     * errno is captured before notify(), which may clobber it. Only runs on the failure path. */
-    int e = errno;
-    notify("[-] Error could not allocate bzimage (%d bytes, errno %d).\n",
-           (int)bzimage_map, e);
+    notify("[-] Error could not allocate bzimage.\n");
     return -1;
   }
 
-  int bzimage_got = read_file_until_eof(bzimage_path, bzimage, bzimage_map);
-  if (bzimage_got <= 0) {
+  bzimage_size =
+      read_file(bzimage_path, bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
+  if (bzimage_size < 0) {
     notify("Something went wrong while reading bzImage - Aborting\n");
     return -1;
   }
-  if (bzimage_stat == 0)
-    notify("[*] bzImage stat size was 0; read %d bytes until EOF.\n",
-           bzimage_got);
-  size_t bzimage_size = (size_t)bzimage_got;
 
-  long initrd_stat = find_and_get_size_of_file("initrd.img", initrd_path);
-  if (initrd_stat < 0) {
+  ssize_t initrd_size = find_and_get_size_of_file("initrd.img", initrd_path);
+  if (initrd_size < 0) {
     notify("File initrd.img not found at default paths - Aborting\n");
     return -1;
   }
 
-  size_t initrd_map = initrd_stat ? ALIGN_UP((size_t)initrd_stat, PAGE_SIZE)
-                                  : (512u << 20);
-  void *initrd = mmap(NULL, initrd_map, PROT_READ | PROT_WRITE,
-                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  void *initrd =
+      mmap(NULL, ALIGN_UP(initrd_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
+           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (initrd == MAP_FAILED) {
-    int e = errno;
-    notify("[-] Error could not allocate initrd (%d bytes, errno %d).\n",
-           (int)initrd_map, e);
+    notify("[-] Error could not allocate initrd.\n");
     return -1;
   }
 
-  int initrd_got = read_file_until_eof(initrd_path, initrd, initrd_map);
-  if (initrd_got <= 0) {
+  initrd_size =
+      read_file(initrd_path, initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
+  if (initrd_size < 0) {
     notify("Something went wrong while reading initrd - Aborting\n");
     return -1;
   }
-  if (initrd_stat == 0)
-    notify("[*] initrd stat size was 0; read %d bytes until EOF.\n",
-           initrd_got);
-  size_t initrd_size = (size_t)initrd_got;
 
   if (dump_device_firmwares(initrd_path) < 0) {
     notify(
@@ -256,35 +233,6 @@ int fetch_linux(struct linux_info *info) {
     trim_newline(cmdline);
   }
 
-  /* Injected boot options.
-   *
-   * The loader owns Linux's command line, so a test can be run without touching the card.
-   *
-   * `nomodeset` WAS HERE AND IS NOW REMOVED (2026-10-13, late). It had already answered its
-   * question -- it is what proved the display is dead BEFORE Linux starts -- and leaving it in
-   * would make the current goal unreachable: with modesetting disabled amdgpu never binds, so
-   * NOTHING can scan out to the panel even if the PS5 op sequence powers the FLAVA3 perfectly.
-   * A run with it in place cannot show a picture by construction.
-   *
-   * Removing it is not a behaviour change for the exploit: the ops (and every marker) run in the
-   * shellcode BEFORE Linux starts, so modesetting cannot affect whether they execute or whether
-   * Linux boots. Measured, not assumed -- the two boots at com3.log 106857 and 112868 carried
-   * `video=DP-1:... amdgpu.force_1080p=1 drm.debug=0x116` and NO nomodeset, and both reached a
-   * login prompt. So amdgpu binding does not prevent the boot.
-   *
-   * Do NOT re-add `drm.debug`: it floods the UART and is what makes the SCK> markers unreadable.
-   * Change this one string to try other options (amdgpu.dc=0, amdgpu.modeset=0, ...). */
-#define EXTRA_CMDLINE ""
-  {
-    size_t l = strlen(cmdline);
-    size_t i = 0;
-    while (EXTRA_CMDLINE[i] && l + i < sizeof(cmdline) - 1) {
-      cmdline[l + i] = EXTRA_CMDLINE[i];
-      i++;
-    }
-    cmdline[l + i] = '\0';
-  }
-
   info->linux_info = kernel_cave_linux_info;
   info->bzimage = kernel_cave_bzImage;
   info->bzimage_size = bzimage_size;
@@ -293,6 +241,50 @@ int fetch_linux(struct linux_info *info) {
   info->vram_size = vram_size;
   info->kit_type = (int)get_kit_type();
   strcpy(info->cmdline, cmdline);
+
+  if (PS5_FW_IS_11XX(fw) && !(fw >= 0x1000 && fw < 0x1100)) {
+    // 11.60 stages the aliases with a checked, journaled transaction instead
+    // of the install_page_syscore loop below.
+    int staged = stage_linux_aliases_1160(
+        info, bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE), initrd,
+        ALIGN_UP(initrd_size, PAGE_SIZE));
+    if (staged) {
+      if (staged == STAGING_REBOOT_FIRST_1160)
+        notify("11.60 Linux alias staging failed. Nothing is armed. Cold "
+               "reboot before trying again.\n");
+      else
+        notify("11.60 Linux alias staging failed. Nothing is armed, so the "
+               "loader can be run again.\n");
+      munmap(initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
+      munmap(bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
+      return -1;
+    }
+    if (fw >= 0x0800 && fw < 0x1100) {
+      /* kernel_cave VAs are below the 10.x DMAP base and only in SYSCORE
+       * page tables.  The kernel shellcode runs under the kernel CR3 and
+       * cannot reach them.  Pre-copy bzImage and initrd to their cave PAs
+       * so the shellcode can access the data via DMAP.  The shellcode's own
+       * copies become self-copies (src == dst) and are harmless. */
+      uint64_t initrd_dest_pa =
+          cave_bzImage + ALIGN_UP((uint64_t)bzimage_size, PAGE_SIZE);
+      kwrite_large(dmap + cave_bzImage, bzimage, (uint64_t)bzimage_size);
+      kwrite_large(dmap + initrd_dest_pa, initrd, (uint64_t)initrd_size);
+
+      /* Alloc one PAGE (16 KB, 16K-aligned) for the linux_info copy plus
+       * the mp3_req/rsp buffers at offsets +0x1000 and +0x2420. */
+      uint64_t info_pa = alloc_page();
+      if (!info_pa)
+        return -1;
+      struct linux_info info_1060 = *info;
+      info_1060.bzimage = dmap + cave_bzImage;
+      info_1060.initrd  = dmap + initrd_dest_pa;
+      kwrite(pa_to_dmap(info_pa), &info_1060, sizeof(struct linux_info));
+
+      /* Redirect linux_info_va to the new kernel-accessible page. */
+      info->linux_info = pa_to_dmap(info_pa);
+    }
+    return 0;
+  }
 
   uint64_t page = alloc_page();
   kwrite(pa_to_dmap(page), info, sizeof(struct linux_info));
@@ -308,5 +300,17 @@ int fetch_linux(struct linux_info *info) {
                          0);
   }
 
+  /* 10.x stages exactly like 13.x; it only needs the #SX stack page that the
+   * 11.60 transaction used to take. */
+  if (fw >= 0x1000 && fw < 0x1100) {
+    uint64_t copy_lo = cave_bzImage;
+    uint64_t copy_hi = cave_bzImage +
+                       ALIGN_UP((uint64_t)bzimage_size, PAGE_SIZE) +
+                       ALIGN_UP((uint64_t)initrd_size, PAGE_SIZE);
+    if (take_sx_stack_page_10xx(copy_lo, copy_hi)) {
+      notify("%04x could not take the #SX stack page\n", fw);
+      return -1;
+    }
+  }
   return 0;
 }
